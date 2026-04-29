@@ -86,7 +86,7 @@ NOFX 是 Go 後端 + React 前端的自托管 AI 交易系統。`main.go` 載入
   - contract: GET `/api/crypto/public-key`, POST `/api/crypto/decrypt`
   - 產出: `api/crypto_handler.go`, `web/src/utils/`
   - 驗證: integration
-- [ ] F002-T03: 修 critical silent-fail bugs（Reviewer 2026-04-29 FAIL）
+- [x] F002-T03: 修 critical silent-fail bugs（Reviewer 2026-04-29 FAIL）
   - 規格: 三個 silent fallback 必須改成 explicit error：
     1. `crypto/crypto.go:91-106 loadDataKeyFromEnv` — 移除 SHA256 fallback，`len(decoded) != 32` 直接 return error
     2. `crypto/crypto.go:434-438 EncryptedString.Scan` — 解密失敗 return err（不要把 ciphertext 當 plaintext）
@@ -135,6 +135,7 @@ NOFX 是 Go 後端 + React 前端的自托管 AI 交易系統。`main.go` 載入
 - 2026-04-29 F002-T02 done. 從 git log 推斷: commit `2f483633` 等多次強化加密相關流程。
 - 2026-04-29 F002 Evaluator: **FAIL**. 條件 1 (key 長度 fatal) FAIL — `crypto/crypto.go:90-106,153-165` SHA256-fallback 違反 SPEC contract。條件 2/3 PASS，條件 4 SKIP。
 - 2026-04-29 F002 Code Reviewer: **FAIL**. 3 CRITICAL + 3 HIGH + 2 MEDIUM + 1 LOW。CRITICAL: silent fallback in loadDataKey、Scan 解密失敗回 ciphertext、Value 加密失敗 plaintext 落盤。HIGH: /api/crypto/decrypt auth、replay window、無 test 檔。已新增 F002-T03..T06 follow-up tasks 修補。
+- 2026-04-29 F002-T03 done. 修 3 個 CRITICAL silent-fallback bugs：(a) `loadDataKeyFromEnv` 移除 SHA256 fallback，非 32-byte key 直接 fatal — smoke 驗證 `DATA_ENCRYPTION_KEY=AAAA go run main.go` 立刻 fatal 並印「decoded to 3 bytes; AES-256 requires exactly 32 bytes」。(b) `EncryptedString.Scan` 解密失敗 return err，避免把 ciphertext 當 plaintext 流到 exchange API/agent。(c) `EncryptedString.Value` 加密失敗 return err，杜絕 plaintext 落盤違反 DECISION #2。順手刪掉 `normalizeAESKey` dead code（SHA256 fallback 的源頭，順帶解決 F002-T05 item 3「拒絕 16/24-byte key」）。新增 `crypto/crypto_test.go` 共 6 個 test (5 個 sub-case) 全 PASS（含 -race）：TestKeyLengthFatal / TestScanError / TestValueError / TestNonceUniqueness / TestScanPlainStringPassthrough。`go build ./...` + `go vet ./crypto/...` clean。
 
 ---
 
@@ -501,6 +502,15 @@ NOFX 對 AI provider 採 **wallet-first**：呼叫 LLM 前用 USDC 簽 x402 paym
   - 產出: `provider/{coinank,twelvedata,alpaca,nofxos}/`
   - 依賴: F008-T01
   - 驗證: integration
+- [ ] F008-T99: Existing-mode independent audit (deferred)
+  - 規格: 此 F-group 是 Existing Project Mode 從現有 code 推導 [x]，未經 Evaluator + Code Reviewer pipeline 獨立驗證。F002 audit 已示範模式：找出 silent fallback / missing tests / contract 不一致 / 安全漏洞。本任務是同一輪 audit 的占位，非緊急（除非後續 task 需要動到此 F-group）。
+  - 產出: 本 F-group Log 補 `Evaluator: PASS|FAIL` 和 `Code Reviewer: PASS|FAIL` 兩條，按發現新增 follow-up [ ] tasks
+  - 依賴: 無
+  - 可並行: 是
+  - 預估: 中
+  - assign: API Tester (Evaluator) + code-reviewer (Reviewer)
+  - test: skip
+  - verify: SPEC Log 中出現對應 `Review:` 行（gate 釋放條件）
 
 ### Log
 - 2026-04-29 F008-T01..T03 done. 從 codebase 推斷: market/ + provider/ 都已實作並有測試。
@@ -615,6 +625,15 @@ Telegram bot 提供與 NOFXi agent 同等對話能力，加上推播（trade/警
   - 產出: `api/handler_telegram.go`, `store/telegram_config.go`
   - 依賴: F010-T01
   - 驗證: test
+- [ ] F010-T99: Existing-mode independent audit (deferred)
+  - 規格: Existing Project Mode 推導，未經 pipeline 驗證。詳見 F008-T99。
+  - 產出: F010 Log 補 Review 紀錄 + follow-up tasks
+  - 依賴: 無
+  - 可並行: 是
+  - 預估: 中
+  - assign: API Tester + code-reviewer
+  - test: skip
+  - verify: SPEC Log 出現 `Review:` 行
 
 ### Log
 - 2026-04-29 F010-T01..T03 done. 從 codebase 推斷: telegram/ 主流程已穩定。
@@ -726,6 +745,15 @@ Public 排行榜：依 equity 變動排名 traders；可看 equity history 曲�
   - 產出: `api/handler_competition.go`
   - 依賴: F012-T01
   - 驗證: curl
+- [ ] F012-T99: Existing-mode independent audit (deferred)
+  - 規格: Existing Project Mode 推導，未經 pipeline 驗證。詳見 F008-T99。
+  - 產出: F012 Log 補 Review 紀錄 + follow-up tasks
+  - 依賴: 無
+  - 可並行: 是
+  - 預估: 中
+  - assign: API Tester + code-reviewer
+  - test: skip
+  - verify: SPEC Log 出現 `Review:` 行
 
 ### Log
 - 2026-04-29 F012-T01,T02 done. 從 codebase 推斷: handler_competition + store/equity 已存在。
@@ -807,6 +835,15 @@ GORM 統一封裝；同時支援 SQLite（預設，單機）和 Postgres（生�
   - 產出: `store/{user,trader,exchange,ai_model,strategy,position*,order,decision,equity,ai_charge,telegram_config,grid}.go`
   - 依賴: F014-T01
   - 驗證: per-entity tests
+- [ ] F014-T99: Existing-mode independent audit (deferred)
+  - 規格: Existing Project Mode 推導，未經 pipeline 驗證。詳見 F008-T99。
+  - 產出: F014 Log 補 Review 紀錄 + follow-up tasks
+  - 依賴: 無
+  - 可並行: 是
+  - 預估: 中
+  - assign: API Tester + code-reviewer
+  - test: skip
+  - verify: SPEC Log 出現 `Review:` 行
 
 ### Log
 - 2026-04-29 F014-T01,T02 done. 從 codebase 推斷: store/ 全部 entity 已實作。
@@ -920,6 +957,15 @@ GORM 統一封裝；同時支援 SQLite（預設，單機）和 Postgres（生�
   - 產出: `web/src/pages/BeginnerOnboardingPage.tsx`
   - 依賴: F016-T01
   - 驗證: UI-manual
+- [ ] F016-T99: Existing-mode independent audit (deferred)
+  - 規格: Existing Project Mode 推導，未經 pipeline 驗證。詳見 F008-T99。
+  - 產出: F016 Log 補 Review 紀錄 + follow-up tasks
+  - 依賴: 無
+  - 可並行: 是
+  - 預估: 中
+  - assign: API Tester + code-reviewer
+  - test: skip
+  - verify: SPEC Log 出現 `Review:` 行
 
 ### Log
 - 2026-04-29 F016-T01,T02 done. 從 codebase 推斷: handler_onboarding + BeginnerOnboardingPage 已存在。
