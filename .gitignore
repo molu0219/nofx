@@ -1,3 +1,15 @@
+# Override global gitignore — harness workflow files must be tracked
+!SPEC.md
+!DECISION.md
+!CLAUDE.md
+!SPEC-archive.md
+
+# Harness runtime (events log, not tracked in git)
+.harness/
+
+# Agent worktrees (temporary, auto-cleaned)
+.claude/worktrees/
+
 # IDE 配置文件
 .idea/
 *.iml
@@ -5,7 +17,7 @@
 
 # AI 工具
 .claude/
-CLAUDE.md
+# CLAUDE.md  # tracked — project context for harness
 
 # 编译产物
 nofx-auto
