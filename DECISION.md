@@ -65,3 +65,10 @@ WHY: bundle 小、學習曲線低；專案規模還沒到 Redux 必要
 RISK: 大量 cross-store 互動時手動串接成本上升
 DATE: 2026-04-20
 RATING: ★★★
+
+### D008: `/api/crypto/decrypt` 暫時保持 unauth — 待 F002-T07 收斂
+CHOSE: 暫不變動現況 (unauth endpoint) > 立即加 JWT > 立即拆除 endpoint
+WHY: F002 Reviewer 標 HIGH 的 decryption oracle 風險真實存在，但現有前端 SetupPage / 註冊 / claw402 wallet 設定流程是否在 pre-login 階段呼叫此 endpoint 尚未 audit；貿然加 JWT 會破壞 onboarding。先靠 F002-T05 的 TS=0 reject 把 replay window 限縮到 5 分鐘，後續由 F002-T07 完整收斂（JWT / AAD purpose 驗證 / rate limit 三選一或合併）。
+RISK: 5 分鐘 replay window 內仍可 oracle；需在 F002-T07 解決前不要把更多敏感欄位放進此 endpoint 的解密來源。
+DATE: 2026-04-29
+RATING: ★★★ (residual risk acknowledged, mitigation 已部分到位)

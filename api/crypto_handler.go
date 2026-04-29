@@ -55,11 +55,16 @@ func (h *CryptoHandler) HandleGetPublicKey(c *gin.Context) {
 
 // ==================== Encrypted Data Decryption Endpoint ====================
 
-// HandleDecryptSensitiveData Decrypt encrypted data sent from client
+// HandleDecryptSensitiveData Decrypt encrypted data sent from client.
+// Per SPEC F002 Contract: RSA decrypt failure → 400 + error code
+// CRYPTO_DECRYPT_FAIL (was previously 500, which mis-categorized client-side
+// payload errors as server faults).
 func (h *CryptoHandler) HandleDecryptSensitiveData(c *gin.Context) {
 	var payload crypto.EncryptedPayload
 	if err := c.ShouldBindJSON(&payload); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "INVALID_REQUEST",
+		})
 		return
 	}
 
@@ -67,7 +72,9 @@ func (h *CryptoHandler) HandleDecryptSensitiveData(c *gin.Context) {
 	decrypted, err := h.cryptoService.DecryptSensitiveData(&payload)
 	if err != nil {
 		log.Printf("❌ Decryption failed: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Decryption failed"})
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "CRYPTO_DECRYPT_FAIL",
+		})
 		return
 	}
 
@@ -79,15 +86,3 @@ func (h *CryptoHandler) HandleDecryptSensitiveData(c *gin.Context) {
 // ==================== Audit Log Query Endpoint ====================
 
 // Audit log functionality removed, not needed in current simplified implementation
-
-// ==================== Utility Functions ====================
-
-// isValidPrivateKey Validate private key format
-func isValidPrivateKey(key string) bool {
-	// EVM private key: 64 hex characters (optional 0x prefix)
-	if len(key) == 64 || (len(key) == 66 && key[:2] == "0x") {
-		return true
-	}
-	// TODO: Add validation for other chains
-	return false
-}

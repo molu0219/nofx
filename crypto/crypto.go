@@ -86,22 +86,23 @@ func loadRSAPrivateKeyFromEnv() (*rsa.PrivateKey, error) {
 	return ParseRSAPrivateKeyFromPEM([]byte(keyPEM))
 }
 
-// loadDataKeyFromEnv loads AES data encryption key from environment variable
+// loadDataKeyFromEnv loads the AES-256 data encryption key from the environment.
+// DATA_ENCRYPTION_KEY must decode (base64 / base64-raw / hex) to exactly 32 bytes;
+// no silent fallback (previously SHA256-hashed any input, which made misconfigured
+// keys invisible until decryption failed downstream).
 func loadDataKeyFromEnv() ([]byte, error) {
 	keyStr := strings.TrimSpace(os.Getenv(EnvDataEncryptionKey))
 	if keyStr == "" {
 		return nil, fmt.Errorf("environment variable %s not set, please configure data encryption key in .env", EnvDataEncryptionKey)
 	}
 
-	// Try to decode
-	if key, ok := decodePossibleKey(keyStr); ok {
-		return key, nil
+	key, ok := decodePossibleKey(keyStr)
+	if !ok {
+		return nil, fmt.Errorf("%s could not be decoded as base64 or hex; expected a 32-byte AES-256 key (generate with `openssl rand -base64 32`)", EnvDataEncryptionKey)
 	}
-
-	// If decoding fails, use SHA256 hash as key
-	sum := sha256.Sum256([]byte(keyStr))
-	key := make([]byte, len(sum))
-	copy(key, sum[:])
+	if len(key) != 32 {
+		return nil, fmt.Errorf("%s decoded to %d bytes; AES-256 requires exactly 32 bytes (generate with `openssl rand -base64 32`)", EnvDataEncryptionKey, len(key))
+	}
 	return key, nil
 }
 
@@ -130,7 +131,11 @@ func ParseRSAPrivateKeyFromPEM(pemBytes []byte) (*rsa.PrivateKey, error) {
 	}
 }
 
-// decodePossibleKey tries to decode key using multiple encoding methods
+// decodePossibleKey returns the bytes produced by the first encoding that
+// successfully parses `value` (base64-std → base64-raw → hex). It does NOT
+// validate length — that is the caller's job, so callers can produce a
+// length-specific error message ("decoded to N bytes; want 32"). Returning
+// (nil, false) means the input could not be parsed by any supported encoding.
 func decodePossibleKey(value string) ([]byte, bool) {
 	decoders := []func(string) ([]byte, error){
 		base64.StdEncoding.DecodeString,
@@ -139,29 +144,12 @@ func decodePossibleKey(value string) ([]byte, bool) {
 	}
 
 	for _, decoder := range decoders {
-		if decoded, err := decoder(value); err == nil {
-			if key, ok := normalizeAESKey(decoded); ok {
-				return key, true
-			}
+		if decoded, err := decoder(value); err == nil && len(decoded) > 0 {
+			return decoded, true
 		}
 	}
 
 	return nil, false
-}
-
-// normalizeAESKey normalizes AES key length
-func normalizeAESKey(raw []byte) ([]byte, bool) {
-	switch len(raw) {
-	case 16, 24, 32:
-		return raw, true
-	case 0:
-		return nil, false
-	default:
-		sum := sha256.Sum256(raw)
-		key := make([]byte, len(sum))
-		copy(key, sum[:])
-		return key, true
-	}
 }
 
 func (cs *CryptoService) HasDataKey() bool {
@@ -281,13 +269,22 @@ func isEncryptedStorageValue(value string) bool {
 	return strings.HasPrefix(value, storagePrefix)
 }
 
+// ErrDecryptPayloadMissingTS is returned by DecryptPayload when the encrypted
+// payload omits the timestamp. A zero timestamp used to skip validation,
+// leaving captured ciphertexts replayable indefinitely. Callers must always
+// include `ts` (unix seconds) in the payload.
+var ErrDecryptPayloadMissingTS = errors.New("encrypted payload missing required ts; replay protection requires a timestamp")
+
 func (cs *CryptoService) DecryptPayload(payload *EncryptedPayload) ([]byte, error) {
-	// 1. Validate timestamp (prevent replay attacks)
-	if payload.TS != 0 {
-		elapsed := time.Since(time.Unix(payload.TS, 0))
-		if elapsed > 5*time.Minute || elapsed < -1*time.Minute {
-			return nil, errors.New("timestamp invalid or expired")
-		}
+	// 1. Validate timestamp (prevent replay attacks). Missing TS used to be
+	// silently allowed, leaving the endpoint open to unbounded replay; now
+	// it is rejected explicitly.
+	if payload.TS == 0 {
+		return nil, ErrDecryptPayloadMissingTS
+	}
+	elapsed := time.Since(time.Unix(payload.TS, 0))
+	if elapsed > 5*time.Minute || elapsed < -1*time.Minute {
+		return nil, errors.New("timestamp invalid or expired")
 	}
 
 	// 2. Decode base64url
@@ -429,15 +426,16 @@ func (es *EncryptedString) Scan(value interface{}) error {
 		return nil
 	}
 
-	// Decrypt if crypto service is set
+	// Decrypt if crypto service is set.
+	// Decryption failure must propagate: silently keeping the ciphertext
+	// (ENC:v1:...) as if it were plaintext lets it reach exchange API
+	// calls, agent decisions, and trader keys downstream.
 	if globalCryptoService != nil && str != "" && globalCryptoService.IsEncryptedStorageValue(str) {
 		decrypted, err := globalCryptoService.DecryptFromStorage(str)
 		if err != nil {
-			// If decryption fails, return the original value
-			*es = EncryptedString(str)
-		} else {
-			*es = EncryptedString(decrypted)
+			return fmt.Errorf("decrypt EncryptedString from storage: %w", err)
 		}
+		*es = EncryptedString(decrypted)
 	} else {
 		*es = EncryptedString(str)
 	}
@@ -451,12 +449,14 @@ func (es EncryptedString) Value() (driver.Value, error) {
 		return "", nil
 	}
 
-	// Encrypt if crypto service is set
+	// Encrypt if crypto service is set.
+	// Encryption failure must propagate: silently writing plaintext to the
+	// database violates the F002 invariant that secrets never land
+	// unencrypted (DECISION #2). Fail the write rather than leak the secret.
 	if globalCryptoService != nil {
 		encrypted, err := globalCryptoService.EncryptForStorage(string(es))
 		if err != nil {
-			// If encryption fails, return the original value
-			return string(es), nil
+			return nil, fmt.Errorf("encrypt EncryptedString for storage: %w", err)
 		}
 		return encrypted, nil
 	}
