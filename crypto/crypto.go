@@ -269,13 +269,22 @@ func isEncryptedStorageValue(value string) bool {
 	return strings.HasPrefix(value, storagePrefix)
 }
 
+// ErrDecryptPayloadMissingTS is returned by DecryptPayload when the encrypted
+// payload omits the timestamp. A zero timestamp used to skip validation,
+// leaving captured ciphertexts replayable indefinitely. Callers must always
+// include `ts` (unix seconds) in the payload.
+var ErrDecryptPayloadMissingTS = errors.New("encrypted payload missing required ts; replay protection requires a timestamp")
+
 func (cs *CryptoService) DecryptPayload(payload *EncryptedPayload) ([]byte, error) {
-	// 1. Validate timestamp (prevent replay attacks)
-	if payload.TS != 0 {
-		elapsed := time.Since(time.Unix(payload.TS, 0))
-		if elapsed > 5*time.Minute || elapsed < -1*time.Minute {
-			return nil, errors.New("timestamp invalid or expired")
-		}
+	// 1. Validate timestamp (prevent replay attacks). Missing TS used to be
+	// silently allowed, leaving the endpoint open to unbounded replay; now
+	// it is rejected explicitly.
+	if payload.TS == 0 {
+		return nil, ErrDecryptPayloadMissingTS
+	}
+	elapsed := time.Since(time.Unix(payload.TS, 0))
+	if elapsed > 5*time.Minute || elapsed < -1*time.Minute {
+		return nil, errors.New("timestamp invalid or expired")
 	}
 
 	// 2. Decode base64url

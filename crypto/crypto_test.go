@@ -1,14 +1,18 @@
 package crypto
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 // freshKeyEnv installs a valid 32-byte AES key + 2048-bit RSA key into the
@@ -207,6 +211,159 @@ func bytes48() []byte {
 		b[i] = byte(i*7 + 251) // mix that produces high-bit / odd patterns
 	}
 	return b
+}
+
+// TestDecryptPayloadRejectsZeroTS locks in F002-T05 item 2: a payload with
+// TS == 0 must be rejected so captured ciphertexts cannot be replayed
+// indefinitely. Previously TS == 0 silently bypassed the 5-minute window.
+func TestDecryptPayloadRejectsZeroTS(t *testing.T) {
+	cs := freshKeyEnv(t)
+	payload := &EncryptedPayload{
+		WrappedKey: "irrelevant",
+		IV:         "irrelevant",
+		Ciphertext: "irrelevant",
+		TS:         0,
+	}
+	_, err := cs.DecryptPayload(payload)
+	if err == nil {
+		t.Fatalf("DecryptPayload(TS=0): expected error, got nil")
+	}
+	if !errors.Is(err, ErrDecryptPayloadMissingTS) {
+		t.Fatalf("DecryptPayload(TS=0): want ErrDecryptPayloadMissingTS, got %v", err)
+	}
+}
+
+// buildEncryptedPayload mirrors the browser's WebCrypto path: generate a
+// fresh AES-GCM session key, encrypt the plaintext under it, then wrap that
+// session key under the server's RSA public key. Used by the round-trip
+// tests below; if either of these steps changes server-side, these tests
+// catch the divergence.
+func buildEncryptedPayload(t *testing.T, cs *CryptoService, plaintext string) *EncryptedPayload {
+	t.Helper()
+
+	// 1. AES-256 session key + 12-byte GCM nonce.
+	sessionKey := make([]byte, 32)
+	if _, err := rand.Read(sessionKey); err != nil {
+		t.Fatalf("rand session key: %v", err)
+	}
+	iv := make([]byte, 12)
+	if _, err := rand.Read(iv); err != nil {
+		t.Fatalf("rand iv: %v", err)
+	}
+
+	block, err := aes.NewCipher(sessionKey)
+	if err != nil {
+		t.Fatalf("aes.NewCipher: %v", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		t.Fatalf("cipher.NewGCM: %v", err)
+	}
+	ct := gcm.Seal(nil, iv, []byte(plaintext), nil)
+
+	// 2. Wrap the session key under the server's RSA-OAEP public key.
+	wrapped, err := rsa.EncryptOAEP(sha256.New(), rand.Reader, &cs.privateKey.PublicKey, sessionKey, nil)
+	if err != nil {
+		t.Fatalf("rsa.EncryptOAEP: %v", err)
+	}
+
+	return &EncryptedPayload{
+		WrappedKey: base64.RawURLEncoding.EncodeToString(wrapped),
+		IV:         base64.RawURLEncoding.EncodeToString(iv),
+		Ciphertext: base64.RawURLEncoding.EncodeToString(ct),
+		TS:         time.Now().Unix(), // T05 fix: must be non-zero
+	}
+}
+
+// TestRSAOAEPRoundtrip locks in F002-T04 (d): a payload built by the client
+// flow round-trips through DecryptPayload back to the original plaintext.
+// Without this, regressions in encoding (base64 variant), AAD handling, or
+// AES-GCM nonce sizing could pass server-side unit tests and still break
+// real clients.
+func TestRSAOAEPRoundtrip(t *testing.T) {
+	cs := freshKeyEnv(t)
+	plaintext := "binance-api-key-EXAMPLE-not-real"
+
+	payload := buildEncryptedPayload(t, cs, plaintext)
+	got, err := cs.DecryptPayload(payload)
+	if err != nil {
+		t.Fatalf("DecryptPayload roundtrip: %v", err)
+	}
+	if string(got) != plaintext {
+		t.Fatalf("roundtrip mismatch: got %q want %q", string(got), plaintext)
+	}
+}
+
+// TestRSAOAEPRejectsCorruptCiphertext locks in F002-T04 (d) the negative path:
+// flipping a single bit in the wrapped key or in the AES-GCM ciphertext must
+// cause DecryptPayload to fail loudly. Silent acceptance would let attackers
+// shape oracle responses.
+func TestRSAOAEPRejectsCorruptCiphertext(t *testing.T) {
+	cs := freshKeyEnv(t)
+	good := buildEncryptedPayload(t, cs, "secret")
+
+	t.Run("corrupt-wrapped-key", func(t *testing.T) {
+		bad := *good
+		bytesB, err := base64.RawURLEncoding.DecodeString(bad.WrappedKey)
+		if err != nil {
+			t.Fatalf("decode wrapped: %v", err)
+		}
+		bytesB[0] ^= 0xFF
+		bad.WrappedKey = base64.RawURLEncoding.EncodeToString(bytesB)
+		if _, err := cs.DecryptPayload(&bad); err == nil {
+			t.Fatalf("expected error for corrupted wrapped key, got nil")
+		}
+	})
+
+	t.Run("corrupt-ciphertext", func(t *testing.T) {
+		bad := *good
+		bytesB, err := base64.RawURLEncoding.DecodeString(bad.Ciphertext)
+		if err != nil {
+			t.Fatalf("decode ciphertext: %v", err)
+		}
+		bytesB[0] ^= 0xFF
+		bad.Ciphertext = base64.RawURLEncoding.EncodeToString(bytesB)
+		if _, err := cs.DecryptPayload(&bad); err == nil {
+			t.Fatalf("expected error for corrupted ciphertext, got nil")
+		}
+	})
+
+	t.Run("expired-ts", func(t *testing.T) {
+		bad := *good
+		bad.TS = time.Now().Add(-10 * time.Minute).Unix()
+		if _, err := cs.DecryptPayload(&bad); err == nil {
+			t.Fatalf("expected error for expired ts, got nil")
+		}
+	})
+}
+
+// TestEncryptedStringRoundtripViaGORM locks in the AES-256-GCM storage path
+// end-to-end: a plaintext value flows through Value() (encrypts), is stored
+// as a string in DB, and Scan() reverses it back to plaintext. This is the
+// integration that production GORM models depend on for every secret column.
+func TestEncryptedStringRoundtripViaGORM(t *testing.T) {
+	freshKeyEnv(t)
+
+	plaintext := EncryptedString("my-private-trading-key")
+	driverVal, err := plaintext.Value()
+	if err != nil {
+		t.Fatalf("Value: %v", err)
+	}
+	stored, ok := driverVal.(string)
+	if !ok {
+		t.Fatalf("Value driver type: got %T want string", driverVal)
+	}
+	if !globalCryptoService.IsEncryptedStorageValue(stored) {
+		t.Fatalf("Value did not produce ENC:v1: ciphertext: %q", stored)
+	}
+
+	var roundtrip EncryptedString
+	if err := roundtrip.Scan(stored); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if string(roundtrip) != string(plaintext) {
+		t.Fatalf("roundtrip mismatch: got %q want %q", string(roundtrip), string(plaintext))
+	}
 }
 
 // helper to silence unused import warning in restricted builds.
