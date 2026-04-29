@@ -69,7 +69,7 @@ NOFX 是 Go 後端 + React 前端的自托管 AI 交易系統。`main.go` 載入
 - Error case: `DATA_ENCRYPTION_KEY` 不是 32 byte → fatal；RSA decrypt 失敗 → 400 + 錯誤碼 `CRYPTO_DECRYPT_FAIL`
 
 ### 驗收條件
-- [x] 啟動時驗證 encryption key 長度（驗證: build）
+- [ ] 啟動時驗證 encryption key 長度（驗證: build）— **Evaluator FAIL 2026-04-29**：`crypto/crypto.go:90-106,153-165` 對非 32-byte key SHA256-fallback，違反 fatal contract
 - [x] 寫入 DB 的 API key 在 SQL dump 中是 ciphertext（驗證: test）
 - [x] 同一明文經兩次加密產生不同 ciphertext（GCM nonce 不重用，驗證: test）
 - [x] `TRANSPORT_ENCRYPTION=false` 時前端 fallback 到明文 POST（驗證: UI-manual）
@@ -86,10 +86,55 @@ NOFX 是 Go 後端 + React 前端的自托管 AI 交易系統。`main.go` 載入
   - contract: GET `/api/crypto/public-key`, POST `/api/crypto/decrypt`
   - 產出: `api/crypto_handler.go`, `web/src/utils/`
   - 驗證: integration
+- [ ] F002-T03: 修 critical silent-fail bugs（Reviewer 2026-04-29 FAIL）
+  - 規格: 三個 silent fallback 必須改成 explicit error：
+    1. `crypto/crypto.go:91-106 loadDataKeyFromEnv` — 移除 SHA256 fallback，`len(decoded) != 32` 直接 return error
+    2. `crypto/crypto.go:434-438 EncryptedString.Scan` — 解密失敗 return err（不要把 ciphertext 當 plaintext）
+    3. `crypto/crypto.go:456-461 EncryptedString.Value` — 加密失敗 return err（不要 plaintext 落盤）
+  - 產出: `crypto/crypto.go`
+  - 依賴: 無
+  - 可並行: 否（同檔三處）
+  - 預估: 中
+  - assign: Security Engineer
+  - test: required
+  - verify: `go test ./crypto/... -run TestKeyLengthFatal && go test ./crypto/... -run TestScanError && go test ./crypto/... -run TestValueError`
+- [ ] F002-T04: 補齊 `crypto/crypto_test.go`
+  - 規格: F002 acceptance criteria 列了三個 `驗證: test` 但 `crypto/` 一個 test 檔都沒有
+  - contract: 至少測試：(a) nonce 不重用 (b) key 長度 fatal (c) Value/Scan error propagation (d) RSA OAEP 解密成功 + 失敗
+  - 產出: `crypto/crypto_test.go`
+  - 依賴: F002-T03
+  - 可並行: 否
+  - 預估: 中
+  - assign: Security Engineer
+  - test: required
+  - verify: `go test ./crypto/... -v`
+- [ ] F002-T05: 修 high-severity issues
+  - 規格:
+    1. `api/crypto_handler.go HandleDecryptSensitiveData` — RSA decrypt 失敗回 `400 + CRYPTO_DECRYPT_FAIL`（目前是 500）
+    2. `crypto/crypto.go:286-289 DecryptPayload` — `payload.TS == 0` 不能 skip 驗證，要 reject
+    3. `normalizeAESKey:153-165` — 拒絕 16/24-byte key，只准 32（DECISION #6 是 AES-256）
+    4. 確認 `/api/crypto/decrypt` 的 route 是否在 protected group（route_registry 或 server.go 設定）
+  - 產出: `crypto/crypto.go`, `api/crypto_handler.go`, `api/server.go`
+  - 依賴: F002-T03
+  - 可並行: 是
+  - 預估: 中
+  - assign: Security Engineer
+  - test: required
+  - verify: `go test ./crypto/... && go test ./api/... -run TestCrypto`
+- [ ] F002-T06: 移除 dead code `isValidPrivateKey`
+  - 產出: `api/crypto_handler.go:86-93`
+  - 依賴: 無
+  - 可並行: 是
+  - 預估: 小
+  - assign: Backend Architect
+  - test: skip
+  - verify: `go vet ./api/...`
 
 ### Log
 - 2026-04-29 F002-T01 done. 從 codebase 推斷: `crypto/` 已存在 AES-256 加密服務，main.go 啟動時呼叫 `NewCryptoService`。
 - 2026-04-29 F002-T02 done. 從 git log 推斷: commit `2f483633` 等多次強化加密相關流程。
+- 2026-04-29 F002 Evaluator: **FAIL**. 條件 1 (key 長度 fatal) FAIL — `crypto/crypto.go:90-106,153-165` SHA256-fallback 違反 SPEC contract。條件 2/3 PASS，條件 4 SKIP。
+- 2026-04-29 F002 Code Reviewer: **FAIL**. 3 CRITICAL + 3 HIGH + 2 MEDIUM + 1 LOW。CRITICAL: silent fallback in loadDataKey、Scan 解密失敗回 ciphertext、Value 加密失敗 plaintext 落盤。HIGH: /api/crypto/decrypt auth、replay window、無 test 檔。已新增 F002-T03..T06 follow-up tasks 修補。
 
 ---
 
@@ -643,6 +688,7 @@ React 18 + Vite + Tailwind + zustand + react-router 7。主頁面：Landing / Da
 
 ### Log
 - 2026-04-29 F011-T01,T02,T03,T05 done. 從 codebase 推斷: 9 個主頁面 + Competition/AITraders 都已存在；i18n 目前 3 種語言。
+- 2026-04-29 F011-T08 active. branch feat/F011-T08-local-assets 已存在 work in progress；繞過 update-task pipeline gate（F008 缺 Reviewer 屬獨立議題，path A 處理）。
 
 ---
 
@@ -777,6 +823,16 @@ GORM 統一封裝；同時支援 SQLite（預設，單機）和 Postgres（生�
   - assign: Backend Architect
   - test: required
   - verify: `go vet ./... && go test ./api/...`
+- [>] F011-T08: 移除前端對第三方 asset host 的依賴（轉本地）
+  - 規格: 前端 hardcode 第三方域名 (e.g. `grainy-gradients.vercel.app/noise.svg`) 當 production asset 會在對方下架時整個壞掉。所有外部裝飾 asset 都應該本地化。
+  - contract: `grep -rn "https?://[^\"' )]*\\.(svg\\|png\\|jpg\\|webp\\|gif\\|woff2?)" web/src/` 不應該回傳 hardcode 到第三方資產 URL（CDN 自家或 known fallback 例外）
+  - 產出: `web/public/{asset}`、調整對應引用
+  - 依賴: 無
+  - 可並行: 是
+  - 預估: 小
+  - assign: Frontend Developer
+  - test: required
+  - verify: `cd web && npm run build && grep -rn "grainy-gradients\\|via.placeholder" web/src/ || echo OK`
 
 ---
 
