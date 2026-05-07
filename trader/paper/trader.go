@@ -434,7 +434,7 @@ func (t *Trader) GetPositions() ([]map[string]interface{}, error) {
 			"markPrice":        mark,
 			"unRealizedProfit": unrealizedPnL(p, mark),
 			"leverage":         float64(p.Leverage),
-			"liquidationPrice": liquidationPrice(p),
+			"liquidationPrice": t.liquidationPriceLocked(p),
 			"side":             p.Side,
 		})
 	}
@@ -612,12 +612,18 @@ func (t *Trader) SetLeverage(symbol string, leverage int) error {
 	return nil
 }
 
-// SetMarginMode records cross vs isolated. V1 always uses isolated math for
-// liquidation price; cross is stored for display/parity but does not (yet) widen
-// the liquidation buffer using account-wide equity.
+// SetMarginMode switches between isolated and cross margin. Mode changes are
+// rejected while open positions exist (matches real CEX behaviour — Binance,
+// Bybit, OKX all require flat positions before flipping margin mode).
 func (t *Trader) SetMarginMode(symbol string, isCrossMargin bool) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.isCrossMargin == isCrossMargin {
+		return nil // no-op
+	}
+	if len(t.positions) > 0 {
+		return fmt.Errorf("paper: cannot change margin mode while %d position(s) are open", len(t.positions))
+	}
 	t.isCrossMargin = isCrossMargin
 	t.persistOrLog("set_margin_mode")
 	return nil
@@ -855,15 +861,13 @@ func positionMargin(p *Position) float64 {
 	return (p.EntryPrice * p.Quantity) / float64(p.Leverage)
 }
 
-// liquidationPrice returns the isolated-margin liquidation price for a perp
-// position, accounting for the maintenance-margin haircut. The long/short
+// isolatedLiquidationPrice returns the isolated-margin liquidation price for a
+// perp position, accounting for the maintenance-margin haircut. The long/short
 // formulas mirror what real linear-USDT venues publish:
 //
 //	long  liq = entry * (1 - 1/leverage + maintenance_rate)
 //	short liq = entry * (1 + 1/leverage - maintenance_rate)
-//
-// V1 ignores funding accrual and tier-based maintenance margin.
-func liquidationPrice(p *Position) float64 {
+func isolatedLiquidationPrice(p *Position) float64 {
 	if p == nil || p.Leverage <= 0 {
 		return 0
 	}
@@ -874,13 +878,75 @@ func liquidationPrice(p *Position) float64 {
 	return p.EntryPrice * (1 + imBuffer - MaintenanceMarginRate)
 }
 
-// isLiquidated reports whether a position is at or beyond its liquidation price
-// at the given mark.
+// liquidationPrice picks the right formula based on margin mode. Caller MUST
+// hold t.mu for cross mode (it reads other positions + balance).
+func (t *Trader) liquidationPriceLocked(p *Position) float64 {
+	if t.isCrossMargin {
+		return t.crossLiquidationPriceLocked(p)
+	}
+	return isolatedLiquidationPrice(p)
+}
+
+// crossLiquidationPriceLocked computes the mark price at which position p
+// would push account-level margin balance below total maintenance margin,
+// holding all other positions at their current marks. Caller MUST hold t.mu.
+//
+// Derivation (long):
+//
+//	margin_balance ≤ total_maintenance
+//	wallet + Σ unreal_all = mark·qty·MMR + Σ other_maintenance
+//	Let K = wallet + Σ other_unreal − Σ other_maintenance
+//	K + (mark − entry)·qty = mark·qty·MMR
+//	→ liq = (entry·qty − K) / (qty·(1 − MMR))
+//
+// Short mirrors with sign flip; result is clamped to ≥ 0 for sane display.
+func (t *Trader) crossLiquidationPriceLocked(p *Position) float64 {
+	if p == nil || p.Quantity == 0 {
+		return 0
+	}
+	K := t.balance
+	for sym, other := range t.positions {
+		if other == p {
+			continue
+		}
+		mark, err := t.getMarkPrice(sym)
+		if err != nil {
+			// Without other positions' marks we can't project accurately.
+			// Fall back to isolated as a conservative display value.
+			return isolatedLiquidationPrice(p)
+		}
+		K += unrealizedPnL(other, mark)
+		K -= mark * other.Quantity * MaintenanceMarginRate
+	}
+
+	var liq float64
+	if p.Side == "long" {
+		denom := p.Quantity * (1 - MaintenanceMarginRate)
+		if denom == 0 {
+			return 0
+		}
+		liq = (p.EntryPrice*p.Quantity - K) / denom
+	} else {
+		denom := p.Quantity * (1 + MaintenanceMarginRate)
+		if denom == 0 {
+			return 0
+		}
+		liq = (p.EntryPrice*p.Quantity + K) / denom
+	}
+	if liq < 0 {
+		return 0
+	}
+	return liq
+}
+
+// isLiquidated reports whether a position is at or beyond its isolated
+// liquidation price at the given mark. This is only used for isolated-mode
+// settlement; cross mode evaluates account-level health instead.
 func isLiquidated(p *Position, mark float64) bool {
 	if p == nil || p.Quantity == 0 {
 		return false
 	}
-	liq := liquidationPrice(p)
+	liq := isolatedLiquidationPrice(p)
 	if p.Side == "long" {
 		return mark <= liq
 	}
@@ -1090,12 +1156,20 @@ func shouldTrigger(o *pendingOrder, posSide string, mark float64) bool {
 	}
 }
 
-// settleLiquidationsLocked force-closes any position whose mark price has
-// crossed its liquidation level. The full initial margin is written off (no
-// "remainder returned to wallet" — V1 simplification consistent with isolated
-// liquidation losing the entire margin). Caller MUST hold t.mu (write).
-// Returns true if any position was liquidated.
+// settleLiquidationsLocked dispatches to the right margin-mode handler.
+// Caller MUST hold t.mu (write). Returns true if any position was liquidated.
 func (t *Trader) settleLiquidationsLocked() (changed bool) {
+	if t.isCrossMargin {
+		return t.settleCrossLiquidationsLocked()
+	}
+	return t.settleIsolatedLiquidationsLocked()
+}
+
+// settleIsolatedLiquidationsLocked force-closes any position whose mark price
+// has crossed its isolated liquidation level. The full initial margin of that
+// position is written off; other positions are unaffected. Caller MUST hold
+// t.mu (write).
+func (t *Trader) settleIsolatedLiquidationsLocked() (changed bool) {
 	for sym, p := range t.positions {
 		mark, err := t.getMarkPrice(sym)
 		if err != nil {
@@ -1104,7 +1178,7 @@ func (t *Trader) settleLiquidationsLocked() (changed bool) {
 		if !isLiquidated(p, mark) {
 			continue
 		}
-		liq := liquidationPrice(p)
+		liq := isolatedLiquidationPrice(p)
 		margin := positionMargin(p)
 
 		// Realized loss = -margin. Wallet absorbs that loss directly.
@@ -1120,7 +1194,7 @@ func (t *Trader) settleLiquidationsLocked() (changed bool) {
 			Fee:         0,
 			Leverage:    p.Leverage,
 			EntryTime:   p.OpenedAt,
-			ExitTime:    time.Now().UTC(),
+			ExitTime:    t.now(),
 			OrderID:     t.nextOrderID("LIQ"),
 			CloseType:   "liquidation",
 			ExchangeID:  "paper",
@@ -1134,11 +1208,88 @@ func (t *Trader) settleLiquidationsLocked() (changed bool) {
 		}
 		delete(t.positions, sym)
 
-		logger.Infof("📄 [paper] LIQUIDATED %s %s qty=%.6f mark=%.4f liq=%.4f loss=%.4f balance=%.2f",
+		logger.Infof("📄 [paper] LIQUIDATED (isolated) %s %s qty=%.6f mark=%.4f liq=%.4f loss=%.4f balance=%.2f",
 			strings.ToUpper(p.Side), sym, p.Quantity, mark, liq, margin, t.balance)
 		changed = true
 	}
 	return changed
+}
+
+// settleCrossLiquidationsLocked checks account-level health and, if violated,
+// liquidates ALL open positions at their current marks. The wallet absorbs the
+// realized losses; cross can lose more than any single position's initial
+// margin, so the wallet may end at zero (clamped — wallet never goes negative
+// in this simplified V2 model). Caller MUST hold t.mu (write).
+//
+// Real venues (Binance) progressively close worst positions first; we close
+// everything at once for simplicity. The end-state cash is identical when all
+// positions ultimately close at current marks.
+func (t *Trader) settleCrossLiquidationsLocked() (changed bool) {
+	if len(t.positions) == 0 {
+		return false
+	}
+
+	// Collect marks first; if any are missing, defer the whole decision.
+	marks := make(map[string]float64, len(t.positions))
+	var unrealTotal, maintTotal float64
+	for sym, p := range t.positions {
+		mark, err := t.getMarkPrice(sym)
+		if err != nil {
+			return false
+		}
+		marks[sym] = mark
+		unrealTotal += unrealizedPnL(p, mark)
+		maintTotal += mark * p.Quantity * MaintenanceMarginRate
+	}
+
+	marginBalance := t.balance + unrealTotal
+	if marginBalance > maintTotal {
+		return false // account is healthy
+	}
+
+	// Liquidation event — close every position at current mark.
+	for sym, p := range t.positions {
+		mark := marks[sym]
+		realized := realizedPnL(p, mark, p.Quantity)
+		t.balance += realized // can be negative; wallet will be clamped below
+
+		t.closed = append(t.closed, types.ClosedPnLRecord{
+			Symbol:      sym,
+			Side:        p.Side,
+			EntryPrice:  p.EntryPrice,
+			ExitPrice:   mark,
+			Quantity:    p.Quantity,
+			RealizedPnL: realized,
+			Fee:         0,
+			Leverage:    p.Leverage,
+			EntryTime:   p.OpenedAt,
+			ExitTime:    t.now(),
+			OrderID:     t.nextOrderID("XLIQ"),
+			CloseType:   "liquidation",
+			ExchangeID:  "paper",
+		})
+		for id, o := range t.orders {
+			if o.symbol == sym {
+				delete(t.orders, id)
+			}
+		}
+		logger.Infof("📄 [paper] LIQUIDATED (cross) %s %s qty=%.6f mark=%.4f realized=%.4f",
+			strings.ToUpper(p.Side), sym, p.Quantity, mark, realized)
+		changed = true
+	}
+
+	// Drop all positions in a second pass (avoids mutating the map during iter
+	// in the loop above — but Go's map delete during range is safe; this is
+	// just defensive style).
+	for sym := range t.positions {
+		delete(t.positions, sym)
+	}
+
+	if t.balance < 0 {
+		t.balance = 0
+	}
+	logger.Infof("📄 [paper] CROSS ACCOUNT LIQUIDATION complete: balance=%.2f", t.balance)
+	return true
 }
 
 // Time helper — exposed so tests can confirm the funding clock.

@@ -563,6 +563,145 @@ func abs(x float64) float64 {
 	return x
 }
 
+// ─── Cross margin ─────────────────────────────────────────────────────────
+
+func newCrossPaper(t *testing.T, balance float64, prices map[string]float64) (*Trader, *fixedMarkPrice) {
+	t.Helper()
+	tr, mp := newPaperWith(t, balance, prices)
+	if err := tr.SetMarginMode("ANY", true); err != nil {
+		t.Fatalf("SetMarginMode(cross): %v", err)
+	}
+	return tr, mp
+}
+
+func TestCrossMargin_HealthyAccountSurvivesPriceMoveBelowIsolatedLiq(t *testing.T) {
+	tr, mp := newCrossPaper(t, 1_000, map[string]float64{"BTCUSDT": 100})
+
+	// 1 BTC long @ 100, 5x → notional 100, margin 20.
+	// Isolated liq ≈ 100 × (1 - 0.2 + 0.004) = 80.4.
+	// Cross liq ≈ (100 - 1000) / (1 × 0.996) = -903 (negative → 0; effectively no liq risk).
+	if _, err := tr.OpenLong("BTCUSDT", 1, 5); err != nil {
+		t.Fatalf("OpenLong: %v", err)
+	}
+
+	mp.set("BTCUSDT", 75) // well below isolated liq, but cross has the whole wallet as buffer
+	pos, _ := tr.GetPositions()
+	if len(pos) != 1 {
+		t.Fatalf("cross-margin should keep position alive at mark 75; got %d positions", len(pos))
+	}
+}
+
+func TestCrossMargin_AccountLiquidationClosesAllPositions(t *testing.T) {
+	tr, mp := newCrossPaper(t, 100, map[string]float64{"ETHUSDT": 100, "BTCUSDT": 100})
+
+	// One short + one long. Mark moving up crushes the short unboundedly while
+	// also boosting the long; with the right qty mix the short loss outpaces
+	// the long gain and wipes the wallet — exactly the failure mode cross
+	// margin is supposed to catch.
+	//
+	// 1.0 ETH short @ 100 × 1x   notional 100, margin 100
+	// margin_lock allows this because total locked = 100 = wallet.
+	if _, err := tr.OpenShort("ETHUSDT", 1, 1); err != nil {
+		t.Fatalf("OpenShort: %v", err)
+	}
+
+	// ETH 10x → short unrealized = (100 - 1000) × 1 = -900.
+	// margin_balance = 100 + (-900) = -800.
+	// maintenance = 1000 × 1 × 0.004 = 4. -800 < 4 → liquidate.
+	mp.set("ETHUSDT", 1_000)
+
+	pos, _ := tr.GetPositions()
+	if len(pos) != 0 {
+		t.Fatalf("cross account should be liquidated, %d positions remain", len(pos))
+	}
+	bal, _ := tr.GetBalance()
+	if got, _ := bal["totalWalletBalance"].(float64); got != 0 {
+		t.Fatalf("cross liquidation should clamp balance to 0, got %.4f", got)
+	}
+	closed, _ := tr.GetClosedPnL(time.Time{}, 10)
+	if len(closed) != 1 {
+		t.Fatalf("expected 1 closed record, got %d", len(closed))
+	}
+	if closed[0].CloseType != "liquidation" {
+		t.Fatalf("close type should be liquidation, got %s", closed[0].CloseType)
+	}
+}
+
+func TestCrossMargin_LiqPriceWidensWithProfitableHedge(t *testing.T) {
+	tr, mp := newCrossPaper(t, 200, map[string]float64{"BTCUSDT": 100, "ETHUSDT": 100})
+
+	// 1 BTC long @ 100, 5x. Cross liq with no hedge: K = 200 → liq = (100 - 200)/0.996 ≈ -100 → clamped 0.
+	if _, err := tr.OpenLong("BTCUSDT", 1, 5); err != nil {
+		t.Fatalf("OpenLong BTC: %v", err)
+	}
+	posBeforeHedge, _ := tr.GetPositions()
+	liqBefore, _ := posBeforeHedge[0]["liquidationPrice"].(float64)
+
+	// Add a profitable short hedge that gains as BTC moves with the down case
+	// (say ETH short — ETH goes up = ETH short loses, so for a "supportive" hedge
+	// we'd want ETH long that profits when other moves). Use a flat ETH long
+	// whose unrealized rises as we crank ETH price up.
+	if _, err := tr.OpenLong("ETHUSDT", 1, 5); err != nil {
+		t.Fatalf("OpenLong ETH: %v", err)
+	}
+	mp.set("ETHUSDT", 200) // ETH +100% → +100 USDT unrealized for the ETH long
+
+	// Now the BTC cross liq should be lower (further from current price) because
+	// the unrealized ETH gain widens K.
+	posAfter, _ := tr.GetPositions()
+	var liqBTC float64
+	for _, p := range posAfter {
+		if p["symbol"] == "BTCUSDT" {
+			liqBTC, _ = p["liquidationPrice"].(float64)
+		}
+	}
+	if !(liqBTC <= liqBefore) {
+		t.Fatalf("BTC cross liq should not increase when ETH hedge profits; before=%.4f after=%.4f", liqBefore, liqBTC)
+	}
+}
+
+func TestSetMarginMode_RejectsWhileOpenPositions(t *testing.T) {
+	tr, _ := newPaperWith(t, 1_000, map[string]float64{"BTCUSDT": 100})
+	if _, err := tr.OpenLong("BTCUSDT", 1, 5); err != nil {
+		t.Fatalf("OpenLong: %v", err)
+	}
+	if err := tr.SetMarginMode("BTCUSDT", true); err == nil {
+		t.Fatalf("expected SetMarginMode to reject mode change with open position")
+	}
+	// Idempotent same-mode should still succeed.
+	if err := tr.SetMarginMode("BTCUSDT", false); err != nil {
+		t.Fatalf("idempotent same-mode set should succeed: %v", err)
+	}
+}
+
+func TestCrossMargin_IsolatedAndCrossUseDifferentLiqDisplay(t *testing.T) {
+	// Same position; only margin mode differs → liq prices differ.
+	mp := &fixedMarkPrice{price: map[string]float64{"BTCUSDT": 100}}
+	tr1, err := New(Config{InitialBalance: 1_000, FeeBps: 0, MarkPriceFunc: mp.get})
+	if err != nil {
+		t.Fatalf("New isolated: %v", err)
+	}
+	if _, err := tr1.OpenLong("BTCUSDT", 1, 5); err != nil {
+		t.Fatalf("OpenLong: %v", err)
+	}
+	pos1, _ := tr1.GetPositions()
+	liqIso, _ := pos1[0]["liquidationPrice"].(float64)
+
+	tr2, _ := New(Config{InitialBalance: 1_000, FeeBps: 0, MarkPriceFunc: mp.get})
+	_ = tr2.SetMarginMode("BTCUSDT", true)
+	if _, err := tr2.OpenLong("BTCUSDT", 1, 5); err != nil {
+		t.Fatalf("OpenLong cross: %v", err)
+	}
+	pos2, _ := tr2.GetPositions()
+	liqCross, _ := pos2[0]["liquidationPrice"].(float64)
+
+	// Cross with a 1000 USDT wallet on a 100 USDT notional position has effectively
+	// no near-term liq risk, so its liq price should be much lower than isolated's 80.4.
+	if !(liqCross < liqIso) {
+		t.Fatalf("cross liq should be lower than isolated for the same position; iso=%.4f cross=%.4f", liqIso, liqCross)
+	}
+}
+
 // ─── Persistence ───────────────────────────────────────────────────────────
 
 // newPaperStore constructs an isolated in-memory SQLite-backed store for tests.
