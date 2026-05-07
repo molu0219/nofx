@@ -1,7 +1,9 @@
 package trader
 
 import (
+	"sync"
 	"testing"
+	"time"
 )
 
 // newPauseTestTrader builds the minimal AutoTrader required to exercise
@@ -80,6 +82,77 @@ func TestMaybeAutoPause_DefaultThreshold(t *testing.T) {
 	at.consecutiveAIFailures = DefaultMaxConsecutiveAIFailures
 	if !at.maybeAutoPause("at default threshold") {
 		t.Fatalf("should pause at default threshold")
+	}
+}
+
+// recordingNotifier captures every NotifyAutoPause call so tests can assert
+// the right traderID + reason were forwarded.
+type recordingNotifier struct {
+	mu    sync.Mutex
+	calls []autoPauseNotice
+}
+
+type autoPauseNotice struct {
+	traderID, traderName, reason string
+}
+
+func (r *recordingNotifier) NotifyAutoPause(traderID, traderName, reason string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = append(r.calls, autoPauseNotice{traderID, traderName, reason})
+}
+
+func (r *recordingNotifier) drained(t *testing.T, want int) []autoPauseNotice {
+	t.Helper()
+	deadline := time.After(500 * time.Millisecond)
+	for {
+		r.mu.Lock()
+		got := len(r.calls)
+		r.mu.Unlock()
+		if got >= want {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("notifier never received %d call(s); got %d", want, got)
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	r.mu.Lock()
+	out := append([]autoPauseNotice(nil), r.calls...)
+	r.mu.Unlock()
+	return out
+}
+
+func TestMaybeAutoPause_FiresNotifierOnce(t *testing.T) {
+	at := newPauseTestTrader(3)
+	at.consecutiveAIFailures = 5
+	rec := &recordingNotifier{}
+	at.SetNotifier(rec)
+
+	if !at.maybeAutoPause("AI failed 5 times") {
+		t.Fatalf("first call should pause")
+	}
+	if at.maybeAutoPause("repeat") {
+		t.Fatalf("repeat call should be no-op")
+	}
+
+	calls := rec.drained(t, 1)
+	if len(calls) != 1 {
+		t.Fatalf("notifier called %d times, want exactly 1", len(calls))
+	}
+	got := calls[0]
+	if got.traderID != "test-trader" || got.traderName != "test" || got.reason != "AI failed 5 times" {
+		t.Fatalf("unexpected notification: %+v", got)
+	}
+}
+
+func TestMaybeAutoPause_NoNotifierIsNoopSafe(t *testing.T) {
+	at := newPauseTestTrader(3)
+	at.consecutiveAIFailures = 5
+	// Don't call SetNotifier — must not panic.
+	if !at.maybeAutoPause("ok no notifier") {
+		t.Fatalf("expected pause")
 	}
 }
 

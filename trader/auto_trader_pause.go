@@ -53,5 +53,11 @@ func (at *AutoTrader) maybeAutoPause(reason string) bool {
 			logger.Warnf("⛔ failed to persist auto-pause status for trader %s: %v", at.id, err)
 		}
 	}
+
+	// Best-effort out-of-band notification. Fire-and-forget — the implementation
+	// is responsible for not blocking and logging its own delivery errors.
+	if n := at.notifier; n != nil {
+		go n.NotifyAutoPause(at.id, at.name, reason)
+	}
 	return true
 }

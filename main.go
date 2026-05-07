@@ -99,6 +99,10 @@ func main() {
 
 	// Create TraderManager
 	traderManager := manager.NewTraderManager()
+	// Wire Telegram out-of-band notifier so auto-pause events reach the
+	// bound chat without relying on the dashboard. The notifier checks at
+	// call time whether Telegram is configured — no-op if not.
+	traderManager.SetNotifier(telegram.NewNotifier(st))
 
 	// Load all traders from database to memory (may auto-start traders with IsRunning=true)
 	if err := traderManager.LoadTradersFromStore(st); err != nil {

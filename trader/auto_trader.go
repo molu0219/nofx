@@ -200,6 +200,7 @@ type AutoTrader struct {
 	safeModeReason        string             // Why safe mode was activated
 	autoPaused            bool               // True when the trader auto-paused itself
 	pauseReason           string             // Human-readable reason — surfaced via /api/status
+	notifier              Notifier           // Optional out-of-band notify channel; nil → no-op
 }
 
 // NewAutoTrader creates an automatic trader
@@ -599,6 +600,15 @@ func (at *AutoTrader) Run() error {
 	}
 
 	return nil
+}
+
+// SetNotifier wires an out-of-band notifier (Telegram, email, etc.) for
+// operator-attention events such as auto-pause. Safe to call before Run.
+// Passing nil restores the no-op default.
+func (at *AutoTrader) SetNotifier(n Notifier) {
+	at.isRunningMutex.Lock()
+	defer at.isRunningMutex.Unlock()
+	at.notifier = n
 }
 
 // AutoPauseReason returns the human-readable reason the trader auto-paused

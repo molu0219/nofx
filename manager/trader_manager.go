@@ -30,6 +30,7 @@ type TraderManager struct {
 	traders          map[string]*trader.AutoTrader // key: trader ID
 	loadErrors       map[string]error              // key: trader ID, stores last load error
 	competitionCache *CompetitionCache
+	notifier         trader.Notifier // optional, applied to every trader on load
 	mu               sync.RWMutex
 }
 
@@ -42,6 +43,16 @@ func NewTraderManager() *TraderManager {
 			data: make(map[string]interface{}),
 		},
 	}
+}
+
+// SetNotifier installs a Notifier that every trader the manager creates will
+// receive. Call before LoadTradersFromStore so existing traders pick it up
+// when reloaded; live traders aren't retro-fitted (they're paused or stopped
+// before reload anyway).
+func (tm *TraderManager) SetNotifier(n trader.Notifier) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	tm.notifier = n
 }
 
 // GetLoadError returns the last load error for a trader
@@ -716,6 +727,9 @@ func (tm *TraderManager) addTraderFromStore(traderCfg *store.Trader, aiModelCfg 
 
 	// Create trader instance
 	at, err := trader.NewAutoTrader(traderConfig, st, traderCfg.UserID)
+	if err == nil && at != nil && tm.notifier != nil {
+		at.SetNotifier(tm.notifier)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to create trader: %w", err)
 	}
