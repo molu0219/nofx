@@ -358,6 +358,56 @@ func TestApplyBounded_MarketDataToggles(t *testing.T) {
 	}
 }
 
+func TestApplyBounded_IndicatorPeriodsClampDedupCap(t *testing.T) {
+	o := &StrategyOptimizer{}
+	cfg := &store.StrategyConfig{}
+	cfg.Indicators.EMAPeriods = []int{20, 50}
+	cfg.Indicators.RSIPeriods = []int{14}
+	cfg.Indicators.ATRPeriods = []int{14}
+	cfg.Indicators.BOLLPeriods = []int{20}
+
+	if !o.applyBounded(cfg, optimizerSuggestion{
+		EMAPeriods:  []int{500, 9, 9, 21, 50, 200}, // 500 → clamp to 200, dup 9, take first 4
+		RSIPeriods:  []int{1, 7, 14, 100},          // 1 → 3, 100 → 50, max 3
+		ATRPeriods:  []int{0, 7, 14, 30},           // 0 → 3, max 2
+		BOLLPeriods: []int{2, 20, 50},              // 2 → 5, max 2
+	}) {
+		t.Fatalf("expected change")
+	}
+
+	if !sameIntSet(cfg.Indicators.EMAPeriods, []int{200, 9, 21, 50}) {
+		t.Fatalf("EMA: got=%v", cfg.Indicators.EMAPeriods)
+	}
+	if !sameIntSet(cfg.Indicators.RSIPeriods, []int{3, 7, 14}) {
+		t.Fatalf("RSI: got=%v", cfg.Indicators.RSIPeriods)
+	}
+	if !sameIntSet(cfg.Indicators.ATRPeriods, []int{3, 7}) {
+		t.Fatalf("ATR: got=%v", cfg.Indicators.ATRPeriods)
+	}
+	if !sameIntSet(cfg.Indicators.BOLLPeriods, []int{5, 20}) {
+		t.Fatalf("BOLL: got=%v", cfg.Indicators.BOLLPeriods)
+	}
+}
+
+func TestApplyBounded_IndicatorPeriodsNoChangeOnSameSet(t *testing.T) {
+	o := &StrategyOptimizer{}
+	cfg := &store.StrategyConfig{}
+	cfg.Indicators.EMAPeriods = []int{20, 50}
+
+	// Same set in different order — should NOT report a change.
+	if o.applyBounded(cfg, optimizerSuggestion{EMAPeriods: []int{50, 20}}) {
+		t.Fatalf("same set should not report change")
+	}
+}
+
+func TestNormalisePeriodList_RejectsNonsense(t *testing.T) {
+	got := normalisePeriodList([]int{-5, 0, -1}, 3, 50, 4)
+	// All values get clamped to 3 — only first survives dedup.
+	if len(got) != 1 || got[0] != 3 {
+		t.Fatalf("got %v want [3]", got)
+	}
+}
+
 func TestSummariseSuggestion(t *testing.T) {
 	v := 80
 	out := summariseSuggestion(optimizerSuggestion{

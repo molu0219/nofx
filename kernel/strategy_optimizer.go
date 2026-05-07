@@ -83,6 +83,16 @@ type optimizerSuggestion struct {
 	EnableVolume       *bool    `json:"enable_volume,omitempty"`
 	EnableOI           *bool    `json:"enable_oi,omitempty"`
 	EnableFundingRate  *bool    `json:"enable_funding_rate,omitempty"`
+
+	// Indicator periods — control the lookback applied to each enabled
+	// indicator. Multiplied by the primary timeframe this is the actual
+	// time horizon (e.g. RSI(14) on 5m = 70-min RSI). Letting the
+	// optimizer pick periods is the only way it can match indicator
+	// horizon to the primary_timeframe + market regime it's targeting.
+	EMAPeriods  []int `json:"ema_periods,omitempty"`  // up to 4 entries, each [3, 200]
+	RSIPeriods  []int `json:"rsi_periods,omitempty"`  // up to 3 entries, each [3, 50]
+	ATRPeriods  []int `json:"atr_periods,omitempty"`  // up to 2 entries, each [3, 100]
+	BOLLPeriods []int `json:"boll_periods,omitempty"` // up to 2 entries, each [5, 100]
 }
 
 // allowedTimeframes is the set the optimizer is permitted to choose from.
@@ -327,6 +337,35 @@ func (o *StrategyOptimizer) applyBounded(cfg *store.StrategyConfig, s optimizerS
 		changed = true
 	}
 
+	if len(s.EMAPeriods) > 0 {
+		out := normalisePeriodList(s.EMAPeriods, 3, 200, 4)
+		if len(out) > 0 && !sameIntSet(out, cfg.Indicators.EMAPeriods) {
+			cfg.Indicators.EMAPeriods = out
+			changed = true
+		}
+	}
+	if len(s.RSIPeriods) > 0 {
+		out := normalisePeriodList(s.RSIPeriods, 3, 50, 3)
+		if len(out) > 0 && !sameIntSet(out, cfg.Indicators.RSIPeriods) {
+			cfg.Indicators.RSIPeriods = out
+			changed = true
+		}
+	}
+	if len(s.ATRPeriods) > 0 {
+		out := normalisePeriodList(s.ATRPeriods, 3, 100, 2)
+		if len(out) > 0 && !sameIntSet(out, cfg.Indicators.ATRPeriods) {
+			cfg.Indicators.ATRPeriods = out
+			changed = true
+		}
+	}
+	if len(s.BOLLPeriods) > 0 {
+		out := normalisePeriodList(s.BOLLPeriods, 5, 100, 2)
+		if len(out) > 0 && !sameIntSet(out, cfg.Indicators.BOLLPeriods) {
+			cfg.Indicators.BOLLPeriods = out
+			changed = true
+		}
+	}
+
 	if len(s.ExcludedCoinsAdd) > 0 || len(s.ExcludedCoinsRemove) > 0 {
 		set := make(map[string]bool, len(cfg.CoinSource.ExcludedCoins))
 		for _, sym := range cfg.CoinSource.ExcludedCoins {
@@ -424,7 +463,14 @@ Strict output contract — JSON only:
   "selected_timeframes": ["<tf>", ...],               // up to 4 from the allowed list; auto-enables multi-tf when len>1
   "enable_volume":       <bool>,
   "enable_oi":           <bool>,
-  "enable_funding_rate": <bool>
+  "enable_funding_rate": <bool>,
+
+  // Indicator periods — actual horizon = period × primary_timeframe.
+  // Example: RSI([7,14]) on a 5m primary tf = 35-min and 70-min RSI.
+  "ema_periods":  [<int 3-200>, ...],   // up to 4 entries
+  "rsi_periods":  [<int 3-50>,  ...],   // up to 3 entries
+  "atr_periods":  [<int 3-100>, ...],   // up to 2 entries
+  "boll_periods": [<int 5-100>, ...]    // up to 2 entries
 }
 
 Every field is optional. Output {} if nothing should change.
@@ -435,6 +481,7 @@ How to think about it:
 - If certain symbols repeatedly lose, exclude them.
 - Indicator toggles: turn on EMA/MACD/RSI when the trader is making clearly bad timing calls; turn them off when they don't help and you want to free up token budget for more candidates.
 - Market-data shape: if the trader's losing on chop, slower TFs (15m/1h) help; if it's missing momentum entries, faster (1m/3m) might. Don't oscillate — change at most one of {primary_timeframe, primary_count, selected_timeframes} per review and watch it for a few cycles before changing again.
+- Indicator periods control lookback. Real horizon = period × primary_timeframe. RSI(14) on 1m sees the last 14 minutes; on 1h, the last 14 hours. When you change primary_timeframe, also reconsider periods so the indicator covers a meaningful window (typical: 7-21 for fast signal, 50+ for trend filter). Avoid stuffing redundant periods (e.g. RSI 13/14/15 — pick one short and one long).
 - custom_prompt_append: distill a single concrete rule per review (e.g. "Open with 30% of normal size; scale up after first +2% move"). Never contradict the role.
 
 Constraints:
@@ -489,6 +536,9 @@ func (o *StrategyOptimizer) buildUserPrompt(cfg *store.StrategyConfig, decisions
 		cfg.Indicators.Klines.SelectedTimeframes, cfg.Indicators.Klines.EnableMultiTimeframe))
 	sb.WriteString(fmt.Sprintf("- market data: volume=%t oi=%t funding_rate=%t\n",
 		cfg.Indicators.EnableVolume, cfg.Indicators.EnableOI, cfg.Indicators.EnableFundingRate))
+	sb.WriteString(fmt.Sprintf("- indicator periods: ema=%v rsi=%v atr=%v boll=%v\n",
+		cfg.Indicators.EMAPeriods, cfg.Indicators.RSIPeriods,
+		cfg.Indicators.ATRPeriods, cfg.Indicators.BOLLPeriods))
 	sb.WriteString(fmt.Sprintf("- excluded_coins: %v\n", cfg.CoinSource.ExcludedCoins))
 	sb.WriteString(fmt.Sprintf("- custom_prompt: %d chars (last 200: %q)\n\n",
 		len(cfg.CustomPrompt), tailString(cfg.CustomPrompt, 200)))
@@ -632,6 +682,49 @@ func sameStringSet(a, b []string) bool {
 	}
 	for _, s := range b {
 		if !set[s] {
+			return false
+		}
+	}
+	return true
+}
+
+// normalisePeriodList clamps every entry into [lo, hi], drops dups, caps
+// the result at maxLen, and rejects non-positive values. Empty result
+// means "ignore the suggestion" — caller should treat that as no change.
+func normalisePeriodList(in []int, lo, hi, maxLen int) []int {
+	seen := make(map[int]bool, len(in))
+	out := make([]int, 0, len(in))
+	for _, raw := range in {
+		v := raw
+		if v < lo {
+			v = lo
+		}
+		if v > hi {
+			v = hi
+		}
+		if v <= 0 || seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
+		if len(out) >= maxLen {
+			break
+		}
+	}
+	return out
+}
+
+// sameIntSet treats two int slices as equivalent regardless of order.
+func sameIntSet(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	set := make(map[int]bool, len(a))
+	for _, v := range a {
+		set[v] = true
+	}
+	for _, v := range b {
+		if !set[v] {
 			return false
 		}
 	}
