@@ -136,6 +136,12 @@ type AutoTraderConfig struct {
 	MaxDrawdown     float64       // Maximum drawdown percentage (hint)
 	StopTradingTime time.Duration // Pause duration after risk control triggers
 
+	// MaxConsecutiveAIFailures sets how many AI errors in a row trigger a full
+	// auto-pause (loop stops, status persists to DB). Safe mode kicks in at 3
+	// failures already; this is the harder stop above it. 0 = use the default
+	// (DefaultMaxConsecutiveAIFailures).
+	MaxConsecutiveAIFailures int
+
 	// Position mode
 	IsCrossMargin bool // true=cross margin mode, false=isolated margin mode
 
@@ -182,6 +188,8 @@ type AutoTrader struct {
 	consecutiveAIFailures int                // Consecutive AI call failures
 	safeMode              bool               // Safe mode: no new positions, protect existing ones
 	safeModeReason        string             // Why safe mode was activated
+	autoPaused            bool               // True when the trader auto-paused itself
+	pauseReason           string             // Human-readable reason — surfaced via /api/status
 }
 
 // NewAutoTrader creates an automatic trader
@@ -571,6 +579,26 @@ func (at *AutoTrader) Run() error {
 	}
 
 	return nil
+}
+
+// AutoPauseReason returns the human-readable reason the trader auto-paused
+// itself, or the empty string if the trader is running normally / was stopped
+// manually. Used by /api/status to surface the cause to the dashboard.
+func (at *AutoTrader) AutoPauseReason() string {
+	at.isRunningMutex.RLock()
+	defer at.isRunningMutex.RUnlock()
+	if !at.autoPaused {
+		return ""
+	}
+	return at.pauseReason
+}
+
+// IsAutoPaused reports whether the trader stopped itself due to a runtime
+// failure (vs. user-initiated Stop()).
+func (at *AutoTrader) IsAutoPaused() bool {
+	at.isRunningMutex.RLock()
+	defer at.isRunningMutex.RUnlock()
+	return at.autoPaused
 }
 
 // Stop stops the automatic trading

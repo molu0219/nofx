@@ -80,6 +80,9 @@ func (at *AutoTrader) GetStatus() map[string]interface{} {
 		"stop_until":      at.stopUntil.Format(time.RFC3339),
 		"last_reset_time": at.lastResetTime.Format(time.RFC3339),
 		"ai_provider":     aiProvider,
+		"auto_paused":     at.IsAutoPaused(),
+		"pause_reason":    at.AutoPauseReason(),
+		"safe_mode":       at.safeMode,
 	}
 
 	// Add strategy info

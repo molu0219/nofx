@@ -138,6 +138,13 @@ func (at *AutoTrader) runCycle() error {
 			at.logErrorf("🛡️ Action: Will keep trying AI each cycle. Safe mode auto-deactivates when AI recovers.")
 		}
 
+		// Full auto-pause kicks in at the higher threshold — at this point the
+		// problem is unlikely to fix itself and we stop wasting AI quota.
+		if at.maybeAutoPause(fmt.Sprintf("AI call failed %d times in a row: %v", at.consecutiveAIFailures, err)) {
+			at.saveDecision(record)
+			return nil // loop will exit next tick because isRunning is now false
+		}
+
 		// Print system prompt and AI chain of thought (output even with errors for debugging)
 		if aiDecision != nil {
 			logger.Info("\n" + strings.Repeat("=", 70) + "\n")
