@@ -36,6 +36,9 @@ func (c *StrategyConfig) ClampLimits() {
 	if len(c.CoinSource.StaticCoins) > MaxCandidateCoins {
 		c.CoinSource.StaticCoins = c.CoinSource.StaticCoins[:MaxCandidateCoins]
 	}
+	if c.CoinSource.BinanceTopLimit > MaxCandidateCoins {
+		c.CoinSource.BinanceTopLimit = MaxCandidateCoins
+	}
 
 	// Clamp kline count
 	if c.Indicators.Klines.PrimaryCount < MinKlineCount {
@@ -177,6 +180,10 @@ type CoinSourceConfig struct {
 	UseHyperMain bool `json:"use_hyper_main"`
 	// Hyperliquid Main maximum count (default 20)
 	HyperMainLimit int `json:"hyper_main_limit,omitempty"`
+	// whether to use Binance USDT-M perp top-N by 24h quote volume
+	UseBinanceTop bool `json:"use_binance_top"`
+	// Binance Top maximum count (default 10, capped at MaxCandidateCoins)
+	BinanceTopLimit int `json:"binance_top_limit,omitempty"`
 	// Note: API URLs are now built automatically using NofxOSAPIKey from IndicatorConfig
 }
 

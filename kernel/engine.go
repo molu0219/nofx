@@ -368,6 +368,36 @@ func (e *StrategyEngine) GetCandidateCoins() ([]CandidateCoin, error) {
 		}
 		return e.filterExcludedCoins(coins), nil
 
+	case "binance_top":
+		// Top N Binance USDT-M perp coins by 24h quote volume.
+		// No upstream API key needed — uses the public ticker endpoint.
+		if !coinSource.UseBinanceTop {
+			logger.Infof("⚠️  source_type is 'binance_top' but use_binance_top is false, falling back to static coins")
+			for _, symbol := range coinSource.StaticCoins {
+				symbol = market.Normalize(symbol)
+				candidates = append(candidates, CandidateCoin{
+					Symbol:  symbol,
+					Sources: []string{"static"},
+				})
+			}
+			return e.filterExcludedCoins(candidates), nil
+		}
+		limit := coinSource.BinanceTopLimit
+		if limit <= 0 {
+			limit = 10
+		}
+		symbols, err := FetchBinanceTopByVolume(limit)
+		if err != nil {
+			return nil, err
+		}
+		for _, sym := range symbols {
+			candidates = append(candidates, CandidateCoin{
+				Symbol:  market.Normalize(sym),
+				Sources: []string{"binance_top"},
+			})
+		}
+		return e.filterExcludedCoins(candidates), nil
+
 	case "mixed":
 		if coinSource.UseAI500 {
 			poolCoins, err := e.getAI500Coins(coinSource.AI500Limit)
