@@ -285,6 +285,79 @@ func TestParseOptimizerSuggestion_AllNewFields(t *testing.T) {
 	}
 }
 
+func TestApplyBounded_PrimaryTimeframeAcceptsAllowedOnly(t *testing.T) {
+	o := &StrategyOptimizer{}
+	cfg := &store.StrategyConfig{}
+	cfg.Indicators.Klines.PrimaryTimeframe = "3m"
+
+	bogus := "13m"
+	if o.applyBounded(cfg, optimizerSuggestion{PrimaryTimeframe: &bogus}) {
+		t.Fatalf("13m is not in the allowed list; should not change")
+	}
+	if cfg.Indicators.Klines.PrimaryTimeframe != "3m" {
+		t.Fatalf("primary_timeframe mutated to invalid value: %q", cfg.Indicators.Klines.PrimaryTimeframe)
+	}
+
+	good := "15m"
+	if !o.applyBounded(cfg, optimizerSuggestion{PrimaryTimeframe: &good}) {
+		t.Fatalf("15m is allowed and different — expected change")
+	}
+	if cfg.Indicators.Klines.PrimaryTimeframe != "15m" {
+		t.Fatalf("primary_timeframe got=%q want=15m", cfg.Indicators.Klines.PrimaryTimeframe)
+	}
+}
+
+func TestApplyBounded_PrimaryCountClamps(t *testing.T) {
+	o := &StrategyOptimizer{}
+	cfg := &store.StrategyConfig{}
+	cfg.Indicators.Klines.PrimaryCount = 20
+	too_high := 100
+	if !o.applyBounded(cfg, optimizerSuggestion{PrimaryCount: &too_high}) {
+		t.Fatalf("expected change")
+	}
+	if cfg.Indicators.Klines.PrimaryCount != 30 {
+		t.Fatalf("primary_count clamp got=%d want=30", cfg.Indicators.Klines.PrimaryCount)
+	}
+}
+
+func TestApplyBounded_SelectedTimeframesDedupAndCap(t *testing.T) {
+	o := &StrategyOptimizer{}
+	cfg := &store.StrategyConfig{}
+	cfg.Indicators.Klines.SelectedTimeframes = []string{"3m"}
+
+	if !o.applyBounded(cfg, optimizerSuggestion{
+		SelectedTimeframes: []string{"3m", "3m", " 15M ", "1h", "bogus", "4h", "2h"}, // 5 valid + 1 invalid
+	}) {
+		t.Fatalf("expected change")
+	}
+	got := cfg.Indicators.Klines.SelectedTimeframes
+	if len(got) != 4 {
+		t.Fatalf("len got=%d want=4 (cap)", len(got))
+	}
+	want := map[string]bool{"3m": true, "15m": true, "1h": true, "4h": true}
+	for _, tf := range got {
+		if !want[tf] {
+			t.Fatalf("unexpected tf %q (got=%v)", tf, got)
+		}
+	}
+	if !cfg.Indicators.Klines.EnableMultiTimeframe {
+		t.Fatalf("multi-timeframe should auto-enable when len > 1")
+	}
+}
+
+func TestApplyBounded_MarketDataToggles(t *testing.T) {
+	o := &StrategyOptimizer{}
+	cfg := &store.StrategyConfig{}
+	cfg.Indicators.EnableVolume = true
+	fa := false
+	if !o.applyBounded(cfg, optimizerSuggestion{EnableVolume: &fa, EnableOI: &fa, EnableFundingRate: &fa}) {
+		t.Fatalf("expected change")
+	}
+	if cfg.Indicators.EnableVolume || cfg.Indicators.EnableOI || cfg.Indicators.EnableFundingRate {
+		t.Fatalf("toggles not applied: %+v", cfg.Indicators)
+	}
+}
+
 func TestSummariseSuggestion(t *testing.T) {
 	v := 80
 	out := summariseSuggestion(optimizerSuggestion{

@@ -73,6 +73,24 @@ type optimizerSuggestion struct {
 	EnableRSI  *bool `json:"enable_rsi,omitempty"`
 	EnableATR  *bool `json:"enable_atr,omitempty"`
 	EnableBOLL *bool `json:"enable_boll,omitempty"`
+
+	// Market data shape — letting the optimizer test "is my timeframe too
+	// noisy / too slow" / "do I need volume to trade well" is the only way
+	// it can characterise the data its decisions ride on.
+	PrimaryTimeframe   *string  `json:"primary_timeframe,omitempty"`   // one of allowedTimeframes
+	PrimaryCount       *int     `json:"primary_count,omitempty"`       // 10-30
+	SelectedTimeframes []string `json:"selected_timeframes,omitempty"` // up to 4 entries from allowedTimeframes
+	EnableVolume       *bool    `json:"enable_volume,omitempty"`
+	EnableOI           *bool    `json:"enable_oi,omitempty"`
+	EnableFundingRate  *bool    `json:"enable_funding_rate,omitempty"`
+}
+
+// allowedTimeframes is the set the optimizer is permitted to choose from.
+// Restricting the menu (vs free-form strings) keeps the prompt structure
+// predictable and the token estimator's per-coin payload sane.
+var allowedTimeframes = map[string]bool{
+	"1m": true, "3m": true, "5m": true, "15m": true, "30m": true,
+	"1h": true, "2h": true, "4h": true,
 }
 
 // MaybeReview triggers a review when both the cycle counter and the wall-
@@ -262,6 +280,53 @@ func (o *StrategyOptimizer) applyBounded(cfg *store.StrategyConfig, s optimizerS
 		changed = true
 	}
 
+	if s.PrimaryTimeframe != nil {
+		tf := strings.ToLower(strings.TrimSpace(*s.PrimaryTimeframe))
+		if allowedTimeframes[tf] && tf != cfg.Indicators.Klines.PrimaryTimeframe {
+			cfg.Indicators.Klines.PrimaryTimeframe = tf
+			changed = true
+		}
+	}
+	if s.PrimaryCount != nil {
+		v := clampInt(*s.PrimaryCount, 10, 30)
+		if v != cfg.Indicators.Klines.PrimaryCount {
+			cfg.Indicators.Klines.PrimaryCount = v
+			changed = true
+		}
+	}
+	if len(s.SelectedTimeframes) > 0 {
+		seen := make(map[string]bool, len(s.SelectedTimeframes))
+		out := make([]string, 0, len(s.SelectedTimeframes))
+		for _, raw := range s.SelectedTimeframes {
+			tf := strings.ToLower(strings.TrimSpace(raw))
+			if !allowedTimeframes[tf] || seen[tf] {
+				continue
+			}
+			seen[tf] = true
+			out = append(out, tf)
+			if len(out) >= 4 {
+				break
+			}
+		}
+		if len(out) > 0 && !sameStringSet(out, cfg.Indicators.Klines.SelectedTimeframes) {
+			cfg.Indicators.Klines.SelectedTimeframes = out
+			cfg.Indicators.Klines.EnableMultiTimeframe = len(out) > 1
+			changed = true
+		}
+	}
+	if s.EnableVolume != nil && *s.EnableVolume != cfg.Indicators.EnableVolume {
+		cfg.Indicators.EnableVolume = *s.EnableVolume
+		changed = true
+	}
+	if s.EnableOI != nil && *s.EnableOI != cfg.Indicators.EnableOI {
+		cfg.Indicators.EnableOI = *s.EnableOI
+		changed = true
+	}
+	if s.EnableFundingRate != nil && *s.EnableFundingRate != cfg.Indicators.EnableFundingRate {
+		cfg.Indicators.EnableFundingRate = *s.EnableFundingRate
+		changed = true
+	}
+
 	if len(s.ExcludedCoinsAdd) > 0 || len(s.ExcludedCoinsRemove) > 0 {
 		set := make(map[string]bool, len(cfg.CoinSource.ExcludedCoins))
 		for _, sym := range cfg.CoinSource.ExcludedCoins {
@@ -351,7 +416,15 @@ Strict output contract — JSON only:
   "enable_macd": <bool>,
   "enable_rsi":  <bool>,
   "enable_atr":  <bool>,
-  "enable_boll": <bool>
+  "enable_boll": <bool>,
+
+  // Market data shape — what raw price/volume info the trader sees per cycle
+  "primary_timeframe":   "<one of: 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h>",
+  "primary_count":       <int 10-30>,                 // klines per timeframe
+  "selected_timeframes": ["<tf>", ...],               // up to 4 from the allowed list; auto-enables multi-tf when len>1
+  "enable_volume":       <bool>,
+  "enable_oi":           <bool>,
+  "enable_funding_rate": <bool>
 }
 
 Every field is optional. Output {} if nothing should change.
@@ -361,6 +434,7 @@ How to think about it:
 - If drawdown is approaching the hard-stop, cut leverage and max_positions before anything else.
 - If certain symbols repeatedly lose, exclude them.
 - Indicator toggles: turn on EMA/MACD/RSI when the trader is making clearly bad timing calls; turn them off when they don't help and you want to free up token budget for more candidates.
+- Market-data shape: if the trader's losing on chop, slower TFs (15m/1h) help; if it's missing momentum entries, faster (1m/3m) might. Don't oscillate — change at most one of {primary_timeframe, primary_count, selected_timeframes} per review and watch it for a few cycles before changing again.
 - custom_prompt_append: distill a single concrete rule per review (e.g. "Open with 30% of normal size; scale up after first +2% move"). Never contradict the role.
 
 Constraints:
@@ -410,13 +484,17 @@ func (o *StrategyOptimizer) buildUserPrompt(cfg *store.StrategyConfig, decisions
 	sb.WriteString(fmt.Sprintf("- binance_top_limit: %d (universe size fed to AI)\n", cfg.CoinSource.BinanceTopLimit))
 	sb.WriteString(fmt.Sprintf("- indicators: ema=%t macd=%t rsi=%t atr=%t boll=%t\n",
 		cfg.Indicators.EnableEMA, cfg.Indicators.EnableMACD, cfg.Indicators.EnableRSI, cfg.Indicators.EnableATR, cfg.Indicators.EnableBOLL))
+	sb.WriteString(fmt.Sprintf("- klines: primary=%s count=%d, selected=%v, multi=%t\n",
+		cfg.Indicators.Klines.PrimaryTimeframe, cfg.Indicators.Klines.PrimaryCount,
+		cfg.Indicators.Klines.SelectedTimeframes, cfg.Indicators.Klines.EnableMultiTimeframe))
+	sb.WriteString(fmt.Sprintf("- market data: volume=%t oi=%t funding_rate=%t\n",
+		cfg.Indicators.EnableVolume, cfg.Indicators.EnableOI, cfg.Indicators.EnableFundingRate))
 	sb.WriteString(fmt.Sprintf("- excluded_coins: %v\n", cfg.CoinSource.ExcludedCoins))
 	sb.WriteString(fmt.Sprintf("- custom_prompt: %d chars (last 200: %q)\n\n",
 		len(cfg.CustomPrompt), tailString(cfg.CustomPrompt, 200)))
 
 	sb.WriteString("# Structural config (read-only, not tunable here)\n\n")
-	sb.WriteString(fmt.Sprintf("- coin_source type: %s\n", cfg.CoinSource.SourceType))
-	sb.WriteString(fmt.Sprintf("- timeframes: primary=%s\n\n", cfg.Indicators.Klines.PrimaryTimeframe))
+	sb.WriteString(fmt.Sprintf("- coin_source type: %s\n\n", cfg.CoinSource.SourceType))
 
 	if stats != nil && stats.TotalTrades > 0 {
 		sb.WriteString("# Aggregate trade stats\n\n")
@@ -516,6 +594,27 @@ func summariseSuggestion(s optimizerSuggestion) string {
 	}
 	if s.CustomPromptAppend != "" {
 		parts = append(parts, fmt.Sprintf("prompt+=%dch", len(s.CustomPromptAppend)))
+	}
+	if s.BTCETHLeverage != nil {
+		parts = append(parts, fmt.Sprintf("btc_eth_lev=%d", *s.BTCETHLeverage))
+	}
+	if s.AltcoinLeverage != nil {
+		parts = append(parts, fmt.Sprintf("alt_lev=%d", *s.AltcoinLeverage))
+	}
+	if s.MaxPositions != nil {
+		parts = append(parts, fmt.Sprintf("max_pos=%d", *s.MaxPositions))
+	}
+	if s.BinanceTopLimit != nil {
+		parts = append(parts, fmt.Sprintf("top_n=%d", *s.BinanceTopLimit))
+	}
+	if s.PrimaryTimeframe != nil {
+		parts = append(parts, "primary_tf="+*s.PrimaryTimeframe)
+	}
+	if s.PrimaryCount != nil {
+		parts = append(parts, fmt.Sprintf("primary_count=%d", *s.PrimaryCount))
+	}
+	if len(s.SelectedTimeframes) > 0 {
+		parts = append(parts, "tfs="+strings.Join(s.SelectedTimeframes, "/"))
 	}
 	if len(parts) == 0 {
 		return "(none)"
