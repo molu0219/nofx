@@ -20,6 +20,33 @@ const ICON_PATHS: Record<string, string> = {
   indodax: '/exchange-icons/indodax.png',
 }
 
+// PaperIcon renders a distinct virtual-exchange marker using a paper emoji
+// inside the same rounded surface used for real exchanges. Inline so we don't
+// need to ship an extra asset for what is intentionally a non-real venue.
+const PaperIcon: React.FC<IconProps> = ({
+  width = 24,
+  height = 24,
+  className,
+}) => (
+  <div
+    className={className}
+    style={{
+      width,
+      height,
+      borderRadius: 6,
+      flexShrink: 0,
+      background: 'linear-gradient(135deg, #1A1F2E 0%, #2B3139 100%)',
+      border: '1px dashed rgba(240, 185, 11, 0.5)',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      fontSize: Math.max(12, (width || 24) * 0.55),
+    }}
+  >
+    📄
+  </div>
+)
+
 // 通用图标组件
 const ExchangeImage: React.FC<IconProps & { src: string; alt: string }> = ({
   width = 24,
@@ -84,6 +111,17 @@ export const getExchangeIcon = (
   props: IconProps = {}
 ) => {
   const lowerType = exchangeType.toLowerCase()
+  const iconProps = {
+    width: props.width || 24,
+    height: props.height || 24,
+    className: props.className,
+  }
+
+  // Paper trading is virtual — gets its own emoji-based marker instead of a logo.
+  if (lowerType === 'paper' || lowerType.includes('paper')) {
+    return <PaperIcon {...iconProps} />
+  }
+
   const type = lowerType.includes('binance')
     ? 'binance'
     : lowerType.includes('bybit')
@@ -105,12 +143,6 @@ export const getExchangeIcon = (
                     : lowerType.includes('indodax')
                       ? 'indodax'
                       : lowerType
-
-  const iconProps = {
-    width: props.width || 24,
-    height: props.height || 24,
-    className: props.className,
-  }
 
   const path = ICON_PATHS[type]
   if (path) {

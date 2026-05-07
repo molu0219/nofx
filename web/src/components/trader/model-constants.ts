@@ -6,7 +6,7 @@ export interface Claw402Model {
   provider: string
   desc: string
   icon: string
-  price: number  // USD per call
+  price: number // USD per call
   isNew?: boolean
 }
 
@@ -31,6 +31,8 @@ export function getModelDisplayName(modelId: string): string {
       return 'Qwen'
     case 'claude':
       return 'Claude'
+    case 'claudecli':
+      return 'Claude Code CLI'
     default:
       return modelId.toUpperCase()
   }
@@ -46,22 +48,136 @@ export const DEFAULT_CLAW402_MODEL = 'deepseek-v4-flash'
 
 // Models available through Claw402 (x402 USDC payment protocol)
 export const CLAW402_MODELS: Claw402Model[] = [
-  { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', provider: 'DeepSeek', desc: '$0.003/call', icon: '⚡', price: 0.003, isNew: true },
-  { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', provider: 'DeepSeek', desc: '$0.01/call', icon: '🧠', price: 0.01, isNew: true },
-  { id: 'deepseek', name: 'DeepSeek V3', provider: 'DeepSeek', desc: '$0.003/call', icon: '🔥', price: 0.003 },
-  { id: 'deepseek-reasoner', name: 'DeepSeek R1', provider: 'DeepSeek', desc: '$0.005/call', icon: '🤔', price: 0.005 },
-  { id: 'gpt-5-mini', name: 'GPT-5 Mini', provider: 'OpenAI', desc: '$0.005/call', icon: '🚀', price: 0.005 },
-  { id: 'qwen-turbo', name: 'Qwen Turbo', provider: 'Alibaba', desc: '$0.002/call', icon: '⚡', price: 0.002 },
-  { id: 'qwen-flash', name: 'Qwen Flash', provider: 'Alibaba', desc: '$0.002/call', icon: '⚡', price: 0.002 },
-  { id: 'qwen-plus', name: 'Qwen Plus', provider: 'Alibaba', desc: '$0.005/call', icon: '✨', price: 0.005 },
-  { id: 'kimi-k2.5', name: 'Kimi K2.5', provider: 'Moonshot', desc: '$0.008/call', icon: '🌙', price: 0.008 },
-  { id: 'gpt-5.3', name: 'GPT-5.3', provider: 'OpenAI', desc: '$0.01/call', icon: '💡', price: 0.01 },
-  { id: 'qwen-max', name: 'Qwen Max', provider: 'Alibaba', desc: '$0.01/call', icon: '🌟', price: 0.01 },
-  { id: 'gemini-3.1-pro', name: 'Gemini 3.1 Pro', provider: 'Google', desc: '$0.03/call', icon: '💎', price: 0.03 },
-  { id: 'gpt-5.4', name: 'GPT-5.4', provider: 'OpenAI', desc: '$0.05/call', icon: '⚡', price: 0.05 },
-  { id: 'grok-4.1', name: 'Grok 4.1', provider: 'xAI', desc: '$0.06/call', icon: '⚡', price: 0.06 },
-  { id: 'claude-opus', name: 'Claude Opus', provider: 'Anthropic', desc: '$0.12/call', icon: '🎯', price: 0.12 },
-  { id: 'gpt-5.4-pro', name: 'GPT-5.4 Pro', provider: 'OpenAI', desc: '$0.50/call', icon: '🧠', price: 0.50 },
+  {
+    id: 'deepseek-v4-flash',
+    name: 'DeepSeek V4 Flash',
+    provider: 'DeepSeek',
+    desc: '$0.003/call',
+    icon: '⚡',
+    price: 0.003,
+    isNew: true,
+  },
+  {
+    id: 'deepseek-v4-pro',
+    name: 'DeepSeek V4 Pro',
+    provider: 'DeepSeek',
+    desc: '$0.01/call',
+    icon: '🧠',
+    price: 0.01,
+    isNew: true,
+  },
+  {
+    id: 'deepseek',
+    name: 'DeepSeek V3',
+    provider: 'DeepSeek',
+    desc: '$0.003/call',
+    icon: '🔥',
+    price: 0.003,
+  },
+  {
+    id: 'deepseek-reasoner',
+    name: 'DeepSeek R1',
+    provider: 'DeepSeek',
+    desc: '$0.005/call',
+    icon: '🤔',
+    price: 0.005,
+  },
+  {
+    id: 'gpt-5-mini',
+    name: 'GPT-5 Mini',
+    provider: 'OpenAI',
+    desc: '$0.005/call',
+    icon: '🚀',
+    price: 0.005,
+  },
+  {
+    id: 'qwen-turbo',
+    name: 'Qwen Turbo',
+    provider: 'Alibaba',
+    desc: '$0.002/call',
+    icon: '⚡',
+    price: 0.002,
+  },
+  {
+    id: 'qwen-flash',
+    name: 'Qwen Flash',
+    provider: 'Alibaba',
+    desc: '$0.002/call',
+    icon: '⚡',
+    price: 0.002,
+  },
+  {
+    id: 'qwen-plus',
+    name: 'Qwen Plus',
+    provider: 'Alibaba',
+    desc: '$0.005/call',
+    icon: '✨',
+    price: 0.005,
+  },
+  {
+    id: 'kimi-k2.5',
+    name: 'Kimi K2.5',
+    provider: 'Moonshot',
+    desc: '$0.008/call',
+    icon: '🌙',
+    price: 0.008,
+  },
+  {
+    id: 'gpt-5.3',
+    name: 'GPT-5.3',
+    provider: 'OpenAI',
+    desc: '$0.01/call',
+    icon: '💡',
+    price: 0.01,
+  },
+  {
+    id: 'qwen-max',
+    name: 'Qwen Max',
+    provider: 'Alibaba',
+    desc: '$0.01/call',
+    icon: '🌟',
+    price: 0.01,
+  },
+  {
+    id: 'gemini-3.1-pro',
+    name: 'Gemini 3.1 Pro',
+    provider: 'Google',
+    desc: '$0.03/call',
+    icon: '💎',
+    price: 0.03,
+  },
+  {
+    id: 'gpt-5.4',
+    name: 'GPT-5.4',
+    provider: 'OpenAI',
+    desc: '$0.05/call',
+    icon: '⚡',
+    price: 0.05,
+  },
+  {
+    id: 'grok-4.1',
+    name: 'Grok 4.1',
+    provider: 'xAI',
+    desc: '$0.06/call',
+    icon: '⚡',
+    price: 0.06,
+  },
+  {
+    id: 'claude-opus',
+    name: 'Claude Opus',
+    provider: 'Anthropic',
+    desc: '$0.12/call',
+    icon: '🎯',
+    price: 0.12,
+  },
+  {
+    id: 'gpt-5.4-pro',
+    name: 'GPT-5.4 Pro',
+    provider: 'OpenAI',
+    desc: '$0.50/call',
+    icon: '🧠',
+    price: 0.5,
+  },
 ]
 
 export const BLOCKRUN_MODELS: BlockrunModel[] = [
@@ -134,15 +250,33 @@ export const AI_PROVIDER_CONFIG: Record<string, AIProviderConfig> = {
     apiUrl: 'https://claw402.ai',
     apiName: 'Claw402',
   },
+  // claudecli shells out to the local `claude` (Claude Code CLI) binary —
+  // OAuth subscription auth, no API key needed. Backend-only mode; UI surfaces
+  // it for completeness but the api_key field can be left blank.
+  claudecli: {
+    defaultModel: '',
+    apiUrl: 'https://www.anthropic.com/claude-code',
+    apiName: 'Claude Code CLI',
+  },
 }
 
 // Helper function to get exchange display name from exchange ID (UUID)
-export function getExchangeDisplayName(exchangeId: string | undefined, exchanges: { id: string; exchange_type?: string; name: string; account_name?: string }[]): string {
+export function getExchangeDisplayName(
+  exchangeId: string | undefined,
+  exchanges: {
+    id: string
+    exchange_type?: string
+    name: string
+    account_name?: string
+  }[]
+): string {
   if (!exchangeId) return 'Unknown'
-  const exchange = exchanges.find(e => e.id === exchangeId)
+  const exchange = exchanges.find((e) => e.id === exchangeId)
   if (!exchange) return exchangeId.substring(0, 8).toUpperCase() + '...' // Show truncated UUID if not found
   const typeName = exchange.exchange_type?.toUpperCase() || exchange.name
-  return exchange.account_name ? `${typeName} - ${exchange.account_name}` : typeName
+  return exchange.account_name
+    ? `${typeName} - ${exchange.account_name}`
+    : typeName
 }
 
 // Helper function to check if exchange is a perp-dex type (wallet-based)
@@ -153,7 +287,16 @@ export function isPerpDexExchange(exchangeType: string | undefined): boolean {
 }
 
 // Helper function to get wallet address for perp-dex exchanges
-export function getWalletAddress(exchange: { exchange_type?: string; hyperliquidWalletAddr?: string; lighterWalletAddr?: string; asterSigner?: string } | undefined): string | undefined {
+export function getWalletAddress(
+  exchange:
+    | {
+        exchange_type?: string
+        hyperliquidWalletAddr?: string
+        lighterWalletAddr?: string
+        asterSigner?: string
+      }
+    | undefined
+): string | undefined {
   if (!exchange) return undefined
   const type = exchange.exchange_type?.toLowerCase()
   switch (type) {
@@ -169,7 +312,11 @@ export function getWalletAddress(exchange: { exchange_type?: string; hyperliquid
 }
 
 // Helper function to truncate wallet address for display
-export function truncateAddress(address: string, startLen = 6, endLen = 4): string {
+export function truncateAddress(
+  address: string,
+  startLen = 6,
+  endLen = 4
+): string {
   if (address.length <= startLen + endLen + 3) return address
   return `${address.slice(0, startLen)}...${address.slice(-endLen)}`
 }

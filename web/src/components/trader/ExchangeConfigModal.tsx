@@ -12,8 +12,17 @@ import {
   type WebCryptoCheckStatus,
 } from '../common/WebCryptoEnvironmentCheck'
 import {
-  BookOpen, Trash2, HelpCircle, ExternalLink, UserPlus,
-  Key, Shield, ChevronLeft, Check, Copy, ArrowRight
+  BookOpen,
+  Trash2,
+  HelpCircle,
+  ExternalLink,
+  UserPlus,
+  Key,
+  Shield,
+  ChevronLeft,
+  Check,
+  Copy,
+  ArrowRight,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { Tooltip } from './Tooltip'
@@ -31,6 +40,7 @@ const SUPPORTED_EXCHANGE_TEMPLATES = [
   { exchange_type: 'aster', name: 'Aster DEX', type: 'dex' as const },
   { exchange_type: 'lighter', name: 'Lighter', type: 'dex' as const },
   { exchange_type: 'indodax', name: 'Indodax', type: 'cex' as const },
+  { exchange_type: 'paper', name: 'Paper Trading', type: 'paper' as const },
 ]
 
 interface ExchangeConfigModalProps {
@@ -59,7 +69,13 @@ interface ExchangeConfigModalProps {
 }
 
 // Step indicator component
-function StepIndicator({ currentStep, labels }: { currentStep: number; labels: string[] }) {
+function StepIndicator({
+  currentStep,
+  labels,
+}: {
+  currentStep: number
+  labels: string[]
+}) {
   return (
     <div className="flex items-center justify-center gap-2 mb-6">
       {labels.map((label, index) => (
@@ -68,7 +84,12 @@ function StepIndicator({ currentStep, labels }: { currentStep: number; labels: s
             <div
               className="w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold transition-all"
               style={{
-                background: index < currentStep ? '#0ECB81' : index === currentStep ? '#F0B90B' : '#2B3139',
+                background:
+                  index < currentStep
+                    ? '#0ECB81'
+                    : index === currentStep
+                      ? '#F0B90B'
+                      : '#2B3139',
                 color: index <= currentStep ? '#000' : '#848E9C',
               }}
             >
@@ -84,7 +105,9 @@ function StepIndicator({ currentStep, labels }: { currentStep: number; labels: s
           {index < labels.length - 1 && (
             <div
               className="w-8 h-0.5 mx-1"
-              style={{ background: index < currentStep ? '#0ECB81' : '#2B3139' }}
+              style={{
+                background: index < currentStep ? '#0ECB81' : '#2B3139',
+              }}
             />
           )}
         </React.Fragment>
@@ -100,7 +123,7 @@ function ExchangeCard({
   onClick,
   disabled,
 }: {
-  template: typeof SUPPORTED_EXCHANGE_TEMPLATES[0]
+  template: (typeof SUPPORTED_EXCHANGE_TEMPLATES)[0]
   selected: boolean
   onClick: () => void
   disabled?: boolean
@@ -133,7 +156,10 @@ function ExchangeCard({
       <span
         className="text-xs px-2 py-0.5 rounded-full"
         style={{
-          background: template.type === 'cex' ? 'rgba(240, 185, 11, 0.2)' : 'rgba(139, 92, 246, 0.2)',
+          background:
+            template.type === 'cex'
+              ? 'rgba(240, 185, 11, 0.2)'
+              : 'rgba(139, 92, 246, 0.2)',
           color: template.type === 'cex' ? '#F0B90B' : '#A78BFA',
         }}
       >
@@ -159,10 +185,14 @@ export function ExchangeConfigModal({
   const [passphrase, setPassphrase] = useState('')
   const [testnet, setTestnet] = useState(false)
   const [showGuide, setShowGuide] = useState(false)
-  const [serverIP, setServerIP] = useState<{ public_ip: string; message: string } | null>(null)
+  const [serverIP, setServerIP] = useState<{
+    public_ip: string
+    message: string
+  } | null>(null)
   const [loadingIP, setLoadingIP] = useState(false)
   const [copiedIP, setCopiedIP] = useState(false)
-  const [webCryptoStatus, setWebCryptoStatus] = useState<WebCryptoCheckStatus>('idle')
+  const [webCryptoStatus, setWebCryptoStatus] =
+    useState<WebCryptoCheckStatus>('idle')
   const [showBinanceGuide, setShowBinanceGuide] = useState(false)
 
   // Aster fields
@@ -179,7 +209,9 @@ export function ExchangeConfigModal({
   const [lighterApiKeyIndex, setLighterApiKeyIndex] = useState(0)
 
   // Other state
-  const [secureInputTarget, setSecureInputTarget] = useState<null | 'hyperliquid' | 'aster' | 'lighter'>(null)
+  const [secureInputTarget, setSecureInputTarget] = useState<
+    null | 'hyperliquid' | 'aster' | 'lighter'
+  >(null)
   const [isSaving, setIsSaving] = useState(false)
   const [accountName, setAccountName] = useState('')
 
@@ -188,23 +220,48 @@ export function ExchangeConfigModal({
     : null
 
   const selectedTemplate = editingExchangeId
-    ? SUPPORTED_EXCHANGE_TEMPLATES.find((t) => t.exchange_type === selectedExchange?.exchange_type)
-    : SUPPORTED_EXCHANGE_TEMPLATES.find((t) => t.exchange_type === selectedExchangeType)
+    ? SUPPORTED_EXCHANGE_TEMPLATES.find(
+        (t) => t.exchange_type === selectedExchange?.exchange_type
+      )
+    : SUPPORTED_EXCHANGE_TEMPLATES.find(
+        (t) => t.exchange_type === selectedExchangeType
+      )
 
   const currentExchangeType = editingExchangeId
     ? selectedExchange?.exchange_type
     : selectedExchangeType
 
-  const exchangeRegistrationLinks: Record<string, { url: string; hasReferral?: boolean }> = {
-    binance: { url: 'https://www.binance.com/join?ref=NOFXENG', hasReferral: true },
+  const exchangeRegistrationLinks: Record<
+    string,
+    { url: string; hasReferral?: boolean }
+  > = {
+    binance: {
+      url: 'https://www.binance.com/join?ref=NOFXENG',
+      hasReferral: true,
+    },
     okx: { url: 'https://www.okx.com/join/1865360', hasReferral: true },
     bybit: { url: 'https://partner.bybit.com/b/83856', hasReferral: true },
-    bitget: { url: 'https://www.bitget.com/referral/register?from=referral&clacCode=c8a43172', hasReferral: true },
+    bitget: {
+      url: 'https://www.bitget.com/referral/register?from=referral&clacCode=c8a43172',
+      hasReferral: true,
+    },
     gate: { url: 'https://www.gatenode.xyz/share/VQBGUAxY', hasReferral: true },
-    kucoin: { url: 'https://www.kucoin.com/r/broker/CXEV7XKK', hasReferral: true },
-    hyperliquid: { url: 'https://app.hyperliquid.xyz/join/AITRADING', hasReferral: true },
-    aster: { url: 'https://www.asterdex.com/en/referral/fdfc0e', hasReferral: true },
-    lighter: { url: 'https://app.lighter.xyz/?referral=68151432', hasReferral: true },
+    kucoin: {
+      url: 'https://www.kucoin.com/r/broker/CXEV7XKK',
+      hasReferral: true,
+    },
+    hyperliquid: {
+      url: 'https://app.hyperliquid.xyz/join/AITRADING',
+      hasReferral: true,
+    },
+    aster: {
+      url: 'https://www.asterdex.com/en/referral/fdfc0e',
+      hasReferral: true,
+    },
+    lighter: {
+      url: 'https://app.lighter.xyz/?referral=68151432',
+      hasReferral: true,
+    },
     indodax: { url: 'https://indodax.com/ref/Saep23/1', hasReferral: true },
   }
 
@@ -230,7 +287,8 @@ export function ExchangeConfigModal({
   useEffect(() => {
     if (currentExchangeType === 'binance' && !serverIP) {
       setLoadingIP(true)
-      api.getServerIP()
+      api
+        .getServerIP()
         .then((data) => setServerIP(data))
         .catch((err) => console.error('Failed to load server IP:', err))
         .finally(() => setLoadingIP(false))
@@ -263,8 +321,10 @@ export function ExchangeConfigModal({
   }
 
   const secureInputContextLabel =
-    secureInputTarget === 'aster' ? t('asterExchangeName', language)
-      : secureInputTarget === 'hyperliquid' ? t('hyperliquidExchangeName', language)
+    secureInputTarget === 'aster'
+      ? t('asterExchangeName', language)
+      : secureInputTarget === 'hyperliquid'
+        ? t('hyperliquidExchangeName', language)
         : undefined
 
   const handleSecureInputComplete = ({ value }: TwoStageKeyModalResult) => {
@@ -281,7 +341,11 @@ export function ExchangeConfigModal({
   const maskSecret = (secret: string) => {
     if (!secret || secret.length === 0) return ''
     if (secret.length <= 8) return '*'.repeat(secret.length)
-    return secret.slice(0, 4) + '*'.repeat(Math.max(secret.length - 8, 4)) + secret.slice(-4)
+    return (
+      secret.slice(0, 4) +
+      '*'.repeat(Math.max(secret.length - 8, 4)) +
+      secret.slice(-4)
+    )
   }
 
   const handleSelectExchange = (exchangeType: string) => {
@@ -314,50 +378,153 @@ export function ExchangeConfigModal({
 
     setIsSaving(true)
     try {
-      if (currentExchangeType === 'binance' || currentExchangeType === 'bybit' || currentExchangeType === 'indodax') {
+      if (
+        currentExchangeType === 'binance' ||
+        currentExchangeType === 'bybit' ||
+        currentExchangeType === 'indodax'
+      ) {
         if (!apiKey.trim() || !secretKey.trim()) return
-        await onSave(exchangeId, exchangeType, trimmedAccountName, apiKey.trim(), secretKey.trim(), '', testnet)
-      } else if (currentExchangeType === 'okx' || currentExchangeType === 'bitget' || currentExchangeType === 'kucoin') {
+        await onSave(
+          exchangeId,
+          exchangeType,
+          trimmedAccountName,
+          apiKey.trim(),
+          secretKey.trim(),
+          '',
+          testnet
+        )
+      } else if (
+        currentExchangeType === 'okx' ||
+        currentExchangeType === 'bitget' ||
+        currentExchangeType === 'kucoin'
+      ) {
         if (!apiKey.trim() || !secretKey.trim() || !passphrase.trim()) return
-        await onSave(exchangeId, exchangeType, trimmedAccountName, apiKey.trim(), secretKey.trim(), passphrase.trim(), testnet)
+        await onSave(
+          exchangeId,
+          exchangeType,
+          trimmedAccountName,
+          apiKey.trim(),
+          secretKey.trim(),
+          passphrase.trim(),
+          testnet
+        )
       } else if (currentExchangeType === 'hyperliquid') {
         if (!apiKey.trim() || !hyperliquidWalletAddr.trim()) return
-        await onSave(exchangeId, exchangeType, trimmedAccountName, apiKey.trim(), '', '', testnet, hyperliquidWalletAddr.trim())
+        await onSave(
+          exchangeId,
+          exchangeType,
+          trimmedAccountName,
+          apiKey.trim(),
+          '',
+          '',
+          testnet,
+          hyperliquidWalletAddr.trim()
+        )
       } else if (currentExchangeType === 'aster') {
-        if (!asterUser.trim() || !asterSigner.trim() || !asterPrivateKey.trim()) return
-        await onSave(exchangeId, exchangeType, trimmedAccountName, '', '', '', testnet, undefined, asterUser.trim(), asterSigner.trim(), asterPrivateKey.trim())
+        if (!asterUser.trim() || !asterSigner.trim() || !asterPrivateKey.trim())
+          return
+        await onSave(
+          exchangeId,
+          exchangeType,
+          trimmedAccountName,
+          '',
+          '',
+          '',
+          testnet,
+          undefined,
+          asterUser.trim(),
+          asterSigner.trim(),
+          asterPrivateKey.trim()
+        )
       } else if (currentExchangeType === 'lighter') {
         if (!lighterWalletAddr.trim() || !lighterApiKeyPrivateKey.trim()) return
-        await onSave(exchangeId, exchangeType, trimmedAccountName, '', '', '', testnet, undefined, undefined, undefined, undefined, lighterWalletAddr.trim(), '', lighterApiKeyPrivateKey.trim(), lighterApiKeyIndex)
+        await onSave(
+          exchangeId,
+          exchangeType,
+          trimmedAccountName,
+          '',
+          '',
+          '',
+          testnet,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          lighterWalletAddr.trim(),
+          '',
+          lighterApiKeyPrivateKey.trim(),
+          lighterApiKeyIndex
+        )
+      } else if (currentExchangeType === 'paper') {
+        // Paper trading needs no API keys — the trader's initial_balance is the
+        // virtual wallet balance. Empty credentials are written; backend handles
+        // defaults (5 bps fee, $10k starting balance unless overridden by trader).
+        await onSave(
+          exchangeId,
+          exchangeType,
+          trimmedAccountName,
+          '',
+          '',
+          '',
+          false
+        )
       } else {
         if (!apiKey.trim() || !secretKey.trim()) return
-        await onSave(exchangeId, exchangeType, trimmedAccountName, apiKey.trim(), secretKey.trim(), '', testnet)
+        await onSave(
+          exchangeId,
+          exchangeType,
+          trimmedAccountName,
+          apiKey.trim(),
+          secretKey.trim(),
+          '',
+          testnet
+        )
       }
     } finally {
       setIsSaving(false)
     }
   }
 
-  const stepLabels = [t('exchangeConfig.selectExchange', language), t('exchangeConfig.configure', language)]
-  const cexExchanges = SUPPORTED_EXCHANGE_TEMPLATES.filter(t => t.type === 'cex')
-  const dexExchanges = SUPPORTED_EXCHANGE_TEMPLATES.filter(t => t.type === 'dex')
+  const stepLabels = [
+    t('exchangeConfig.selectExchange', language),
+    t('exchangeConfig.configure', language),
+  ]
+  const cexExchanges = SUPPORTED_EXCHANGE_TEMPLATES.filter(
+    (t) => t.type === 'cex'
+  )
+  const dexExchanges = SUPPORTED_EXCHANGE_TEMPLATES.filter(
+    (t) => t.type === 'dex'
+  )
+  const paperExchanges = SUPPORTED_EXCHANGE_TEMPLATES.filter(
+    (t) => t.type === 'paper'
+  )
+  const isPaper = currentExchangeType === 'paper'
 
   return (
     <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4 overflow-y-auto backdrop-blur-sm">
       <div
         className="rounded-2xl w-full max-w-2xl relative my-8 shadow-2xl"
-        style={{ background: 'linear-gradient(180deg, #1E2329 0%, #181A20 100%)', maxHeight: 'calc(100vh - 4rem)' }}
+        style={{
+          background: 'linear-gradient(180deg, #1E2329 0%, #181A20 100%)',
+          maxHeight: 'calc(100vh - 4rem)',
+        }}
       >
         {/* Header */}
         <div className="flex items-center justify-between p-6 pb-2">
           <div className="flex items-center gap-3">
             {currentStep > 0 && !editingExchangeId && (
-              <button type="button" onClick={handleBack} className="p-2 rounded-lg hover:bg-white/10 transition-colors">
+              <button
+                type="button"
+                onClick={handleBack}
+                className="p-2 rounded-lg hover:bg-white/10 transition-colors"
+              >
                 <ChevronLeft className="w-5 h-5" style={{ color: '#848E9C' }} />
               </button>
             )}
             <h3 className="text-xl font-bold" style={{ color: '#EAECEF' }}>
-              {editingExchangeId ? t('editExchange', language) : t('addExchange', language)}
+              {editingExchangeId
+                ? t('editExchange', language)
+                : t('addExchange', language)}
             </h3>
           </div>
           <div className="flex items-center gap-2">
@@ -366,7 +533,10 @@ export function ExchangeConfigModal({
                 type="button"
                 onClick={() => setShowGuide(true)}
                 className="px-3 py-2 rounded-lg text-sm font-semibold transition-all hover:scale-105 flex items-center gap-2"
-                style={{ background: 'rgba(240, 185, 11, 0.1)', color: '#F0B90B' }}
+                style={{
+                  background: 'rgba(240, 185, 11, 0.1)',
+                  color: '#F0B90B',
+                }}
               >
                 <BookOpen className="w-4 h-4" />
                 {t('viewGuide', language)}
@@ -382,7 +552,12 @@ export function ExchangeConfigModal({
                 <Trash2 className="w-4 h-4" />
               </button>
             )}
-            <button type="button" onClick={onClose} className="p-2 rounded-lg hover:bg-white/10 transition-colors" style={{ color: '#848E9C' }}>
+            <button
+              type="button"
+              onClick={onClose}
+              className="p-2 rounded-lg hover:bg-white/10 transition-colors"
+              style={{ color: '#848E9C' }}
+            >
               ✕
             </button>
           </div>
@@ -396,28 +571,44 @@ export function ExchangeConfigModal({
         )}
 
         {/* Content */}
-        <div className="px-6 pb-6 overflow-y-auto" style={{ maxHeight: 'calc(100vh - 16rem)' }}>
+        <div
+          className="px-6 pb-6 overflow-y-auto"
+          style={{ maxHeight: 'calc(100vh - 16rem)' }}
+        >
           {/* Step 0: Select Exchange */}
           {currentStep === 0 && !editingExchangeId && (
             <div className="space-y-6">
               {/* WebCrypto Check */}
               <div className="space-y-2">
-                <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide" style={{ color: '#848E9C' }}>
+                <div
+                  className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide"
+                  style={{ color: '#848E9C' }}
+                >
                   <Shield className="w-4 h-4" />
                   {t('environmentSteps.checkTitle', language)}
                 </div>
-                <WebCryptoEnvironmentCheck language={language} variant="card" onStatusChange={setWebCryptoStatus} />
+                <WebCryptoEnvironmentCheck
+                  language={language}
+                  variant="card"
+                  onStatusChange={setWebCryptoStatus}
+                />
               </div>
 
               {/* Exchange Grid */}
               <div className="space-y-4">
-                <div className="text-sm font-semibold" style={{ color: '#EAECEF' }}>
+                <div
+                  className="text-sm font-semibold"
+                  style={{ color: '#EAECEF' }}
+                >
                   {t('exchangeConfig.chooseExchange', language)}
                 </div>
 
                 {/* CEX */}
                 <div className="space-y-3">
-                  <div className="text-xs font-medium uppercase tracking-wide" style={{ color: '#F0B90B' }}>
+                  <div
+                    className="text-xs font-medium uppercase tracking-wide"
+                    style={{ color: '#F0B90B' }}
+                  >
                     {t('exchangeConfig.centralizedExchanges', language)}
                   </div>
                   <div className="grid grid-cols-3 sm:grid-cols-5 gap-3">
@@ -425,9 +616,16 @@ export function ExchangeConfigModal({
                       <ExchangeCard
                         key={template.exchange_type}
                         template={template}
-                        selected={selectedExchangeType === template.exchange_type}
-                        onClick={() => handleSelectExchange(template.exchange_type)}
-                        disabled={webCryptoStatus !== 'secure' && webCryptoStatus !== 'disabled'}
+                        selected={
+                          selectedExchangeType === template.exchange_type
+                        }
+                        onClick={() =>
+                          handleSelectExchange(template.exchange_type)
+                        }
+                        disabled={
+                          webCryptoStatus !== 'secure' &&
+                          webCryptoStatus !== 'disabled'
+                        }
                       />
                     ))}
                   </div>
@@ -435,7 +633,10 @@ export function ExchangeConfigModal({
 
                 {/* DEX */}
                 <div className="space-y-3">
-                  <div className="text-xs font-medium uppercase tracking-wide" style={{ color: '#A78BFA' }}>
+                  <div
+                    className="text-xs font-medium uppercase tracking-wide"
+                    style={{ color: '#A78BFA' }}
+                  >
                     {t('exchangeConfig.decentralizedExchanges', language)}
                   </div>
                   <div className="grid grid-cols-3 sm:grid-cols-5 gap-3">
@@ -443,13 +644,47 @@ export function ExchangeConfigModal({
                       <ExchangeCard
                         key={template.exchange_type}
                         template={template}
-                        selected={selectedExchangeType === template.exchange_type}
-                        onClick={() => handleSelectExchange(template.exchange_type)}
-                        disabled={webCryptoStatus !== 'secure' && webCryptoStatus !== 'disabled'}
+                        selected={
+                          selectedExchangeType === template.exchange_type
+                        }
+                        onClick={() =>
+                          handleSelectExchange(template.exchange_type)
+                        }
+                        disabled={
+                          webCryptoStatus !== 'secure' &&
+                          webCryptoStatus !== 'disabled'
+                        }
                       />
                     ))}
                   </div>
                 </div>
+
+                {/* Paper trading — virtual venue, no credentials needed; available
+                    even when the WebCrypto check would otherwise gate real exchanges. */}
+                {paperExchanges.length > 0 && (
+                  <div className="space-y-3">
+                    <div
+                      className="text-xs font-medium uppercase tracking-wide"
+                      style={{ color: '#0ECB81' }}
+                    >
+                      Practice (No Real Money)
+                    </div>
+                    <div className="grid grid-cols-3 sm:grid-cols-5 gap-3">
+                      {paperExchanges.map((template) => (
+                        <ExchangeCard
+                          key={template.exchange_type}
+                          template={template}
+                          selected={
+                            selectedExchangeType === template.exchange_type
+                          }
+                          onClick={() =>
+                            handleSelectExchange(template.exchange_type)
+                          }
+                        />
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -458,38 +693,111 @@ export function ExchangeConfigModal({
           {(currentStep === 1 || editingExchangeId) && selectedTemplate && (
             <form onSubmit={handleSubmit} className="space-y-5">
               {/* Selected Exchange Header */}
-              <div className="p-4 rounded-xl flex items-center gap-4" style={{ background: '#0B0E11', border: '1px solid #2B3139' }}>
-                {getExchangeIcon(selectedTemplate.exchange_type, { width: 48, height: 48 })}
+              <div
+                className="p-4 rounded-xl flex items-center gap-4"
+                style={{ background: '#0B0E11', border: '1px solid #2B3139' }}
+              >
+                {getExchangeIcon(selectedTemplate.exchange_type, {
+                  width: 48,
+                  height: 48,
+                })}
                 <div className="flex-1">
-                  <div className="font-semibold text-lg" style={{ color: '#EAECEF' }}>
+                  <div
+                    className="font-semibold text-lg"
+                    style={{ color: '#EAECEF' }}
+                  >
                     {getShortName(selectedTemplate.name)}
                   </div>
                   <div className="text-xs" style={{ color: '#848E9C' }}>
-                    {selectedTemplate.type.toUpperCase()} • {selectedTemplate.exchange_type}
+                    {selectedTemplate.type.toUpperCase()} •{' '}
+                    {selectedTemplate.exchange_type}
                   </div>
                 </div>
-                <a
-                  href={exchangeRegistrationLinks[currentExchangeType || '']?.url || '#'}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex items-center gap-2 px-4 py-2 rounded-lg transition-all hover:scale-105"
-                  style={{ background: 'rgba(240, 185, 11, 0.1)', border: '1px solid rgba(240, 185, 11, 0.3)' }}
-                >
-                  <UserPlus className="w-4 h-4" style={{ color: '#F0B90B' }} />
-                  <span className="text-sm font-medium" style={{ color: '#F0B90B' }}>
-                    {t('exchangeConfig.register', language)}
-                  </span>
-                  {exchangeRegistrationLinks[currentExchangeType || '']?.hasReferral && (
-                    <span className="text-xs px-1.5 py-0.5 rounded" style={{ background: 'rgba(14, 203, 129, 0.2)', color: '#0ECB81' }}>
-                      {t('exchangeConfig.bonus', language)}
+                {!isPaper && (
+                  <a
+                    href={
+                      exchangeRegistrationLinks[currentExchangeType || '']
+                        ?.url || '#'
+                    }
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center gap-2 px-4 py-2 rounded-lg transition-all hover:scale-105"
+                    style={{
+                      background: 'rgba(240, 185, 11, 0.1)',
+                      border: '1px solid rgba(240, 185, 11, 0.3)',
+                    }}
+                  >
+                    <UserPlus
+                      className="w-4 h-4"
+                      style={{ color: '#F0B90B' }}
+                    />
+                    <span
+                      className="text-sm font-medium"
+                      style={{ color: '#F0B90B' }}
+                    >
+                      {t('exchangeConfig.register', language)}
                     </span>
-                  )}
-                </a>
+                    {exchangeRegistrationLinks[currentExchangeType || '']
+                      ?.hasReferral && (
+                      <span
+                        className="text-xs px-1.5 py-0.5 rounded"
+                        style={{
+                          background: 'rgba(14, 203, 129, 0.2)',
+                          color: '#0ECB81',
+                        }}
+                      >
+                        {t('exchangeConfig.bonus', language)}
+                      </span>
+                    )}
+                  </a>
+                )}
               </div>
+
+              {/* Paper-trading explainer — replaces the API-key flow entirely. */}
+              {isPaper && (
+                <div
+                  className="p-4 rounded-xl space-y-2"
+                  style={{
+                    background: 'rgba(14, 203, 129, 0.08)',
+                    border: '1px solid rgba(14, 203, 129, 0.25)',
+                    color: '#9FE8C5',
+                  }}
+                >
+                  <div
+                    className="text-sm font-semibold flex items-center gap-2"
+                    style={{ color: '#0ECB81' }}
+                  >
+                    📄 Paper Trading — virtual account
+                  </div>
+                  <ul className="text-xs space-y-1 list-disc pl-5">
+                    <li>
+                      No API keys, no real funds, no exchange to sign up for.
+                    </li>
+                    <li>
+                      Live mark prices come from the same market data feed real
+                      traders use.
+                    </li>
+                    <li>
+                      Margin lock, isolated/cross liquidation, funding accrual,
+                      stop-loss/take-profit triggers all behave like a real perp
+                      venue.
+                    </li>
+                    <li>
+                      Set the starting wallet balance later when you create a
+                      trader on this exchange — that becomes the virtual
+                      capital.
+                    </li>
+                    <li>State persists across restarts via the local store.</li>
+                  </ul>
+                </div>
+              )}
 
               {/* Account Name */}
               <div className="space-y-2">
-                <label className="flex items-center gap-2 text-sm font-semibold" style={{ color: '#EAECEF' }}>
+                <label
+                  className="flex items-center gap-2 text-sm font-semibold"
+                  style={{ color: '#EAECEF' }}
+                >
                   <Key className="w-4 h-4" style={{ color: '#F0B90B' }} />
                   {t('exchangeConfig.accountName', language)} *
                 </label>
@@ -497,33 +805,60 @@ export function ExchangeConfigModal({
                   type="text"
                   value={accountName}
                   onChange={(e) => setAccountName(e.target.value)}
-                  placeholder={t('exchangeConfig.accountNamePlaceholder', language)}
+                  placeholder={t(
+                    'exchangeConfig.accountNamePlaceholder',
+                    language
+                  )}
                   className="w-full px-4 py-3 rounded-xl text-base"
-                  style={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF' }}
+                  style={{
+                    background: '#0B0E11',
+                    border: '1px solid #2B3139',
+                    color: '#EAECEF',
+                  }}
                   required
                 />
               </div>
 
               {/* CEX Fields */}
-              {(currentExchangeType === 'binance' || currentExchangeType === 'bybit' || currentExchangeType === 'okx' || currentExchangeType === 'bitget' || currentExchangeType === 'gate' || currentExchangeType === 'kucoin' || currentExchangeType === 'indodax') && (
+              {(currentExchangeType === 'binance' ||
+                currentExchangeType === 'bybit' ||
+                currentExchangeType === 'okx' ||
+                currentExchangeType === 'bitget' ||
+                currentExchangeType === 'gate' ||
+                currentExchangeType === 'kucoin' ||
+                currentExchangeType === 'indodax') && (
                 <>
                   {currentExchangeType === 'binance' && (
                     <div
                       className="p-4 rounded-xl cursor-pointer transition-colors"
-                      style={{ background: '#1a3a52', border: '1px solid #2b5278' }}
+                      style={{
+                        background: '#1a3a52',
+                        border: '1px solid #2b5278',
+                      }}
                       onClick={() => setShowBinanceGuide(!showBinanceGuide)}
                     >
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-2">
                           <span style={{ color: '#58a6ff' }}>ℹ️</span>
-                          <span className="text-sm font-medium" style={{ color: '#EAECEF' }}>
+                          <span
+                            className="text-sm font-medium"
+                            style={{ color: '#EAECEF' }}
+                          >
                             {t('exchangeConfig.useBinanceFuturesApi', language)}
                           </span>
                         </div>
-                        <span style={{ color: '#8b949e' }}>{showBinanceGuide ? '▲' : '▼'}</span>
+                        <span style={{ color: '#8b949e' }}>
+                          {showBinanceGuide ? '▲' : '▼'}
+                        </span>
                       </div>
                       {showBinanceGuide && (
-                        <div className="mt-3 pt-3 text-sm" style={{ borderTop: '1px solid #2b5278', color: '#c9d1d9' }}>
+                        <div
+                          className="mt-3 pt-3 text-sm"
+                          style={{
+                            borderTop: '1px solid #2b5278',
+                            color: '#c9d1d9',
+                          }}
+                        >
                           <a
                             href="https://www.binance.com/zh-CN/support/faq/how-to-create-api-keys-on-binance-360002502072"
                             target="_blank"
@@ -532,7 +867,8 @@ export function ExchangeConfigModal({
                             style={{ color: '#58a6ff' }}
                             onClick={(e) => e.stopPropagation()}
                           >
-                            {t('exchangeConfig.viewTutorial', language)} <ExternalLink className="w-3 h-3" />
+                            {t('exchangeConfig.viewTutorial', language)}{' '}
+                            <ExternalLink className="w-3 h-3" />
                           </a>
                         </div>
                       )}
@@ -542,21 +878,30 @@ export function ExchangeConfigModal({
                   {editingExchangeId && selectedExchange && (
                     <div
                       className="p-3 rounded-xl text-xs"
-                      style={{ background: 'rgba(14, 203, 129, 0.08)', border: '1px solid rgba(14, 203, 129, 0.2)', color: '#9FE8C5' }}
+                      style={{
+                        background: 'rgba(14, 203, 129, 0.08)',
+                        border: '1px solid rgba(14, 203, 129, 0.2)',
+                        color: '#9FE8C5',
+                      }}
                     >
-                      已保存的凭证状态：
-                      {' '}
-                      API Key {selectedExchange.has_api_key ? '已配置' : '未配置'}
+                      已保存的凭证状态： API Key{' '}
+                      {selectedExchange.has_api_key ? '已配置' : '未配置'}
                       {' · '}
-                      Secret {selectedExchange.has_secret_key ? '已配置' : '未配置'}
-                      {(currentExchangeType === 'okx' || currentExchangeType === 'bitget' || currentExchangeType === 'kucoin')
+                      Secret{' '}
+                      {selectedExchange.has_secret_key ? '已配置' : '未配置'}
+                      {currentExchangeType === 'okx' ||
+                      currentExchangeType === 'bitget' ||
+                      currentExchangeType === 'kucoin'
                         ? ` · Passphrase ${selectedExchange.has_passphrase ? '已配置' : '未配置'}`
                         : ''}
                     </div>
                   )}
 
                   <div className="space-y-2">
-                    <label className="flex items-center gap-2 text-sm font-semibold" style={{ color: '#EAECEF' }}>
+                    <label
+                      className="flex items-center gap-2 text-sm font-semibold"
+                      style={{ color: '#EAECEF' }}
+                    >
                       <Key className="w-4 h-4" style={{ color: '#F0B90B' }} />
                       {t('apiKey', language)}
                     </label>
@@ -570,14 +915,24 @@ export function ExchangeConfigModal({
                           : t('enterAPIKey', language)
                       }
                       className="w-full px-4 py-3 rounded-xl"
-                      style={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF' }}
+                      style={{
+                        background: '#0B0E11',
+                        border: '1px solid #2B3139',
+                        color: '#EAECEF',
+                      }}
                       required
                     />
                   </div>
 
                   <div className="space-y-2">
-                    <label className="flex items-center gap-2 text-sm font-semibold" style={{ color: '#EAECEF' }}>
-                      <Shield className="w-4 h-4" style={{ color: '#F0B90B' }} />
+                    <label
+                      className="flex items-center gap-2 text-sm font-semibold"
+                      style={{ color: '#EAECEF' }}
+                    >
+                      <Shield
+                        className="w-4 h-4"
+                        style={{ color: '#F0B90B' }}
+                      />
                       {t('secretKey', language)}
                     </label>
                     <input
@@ -590,14 +945,23 @@ export function ExchangeConfigModal({
                           : t('enterSecretKey', language)
                       }
                       className="w-full px-4 py-3 rounded-xl"
-                      style={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF' }}
+                      style={{
+                        background: '#0B0E11',
+                        border: '1px solid #2B3139',
+                        color: '#EAECEF',
+                      }}
                       required
                     />
                   </div>
 
-                  {(currentExchangeType === 'okx' || currentExchangeType === 'bitget' || currentExchangeType === 'kucoin') && (
+                  {(currentExchangeType === 'okx' ||
+                    currentExchangeType === 'bitget' ||
+                    currentExchangeType === 'kucoin') && (
                     <div className="space-y-2">
-                      <label className="flex items-center gap-2 text-sm font-semibold" style={{ color: '#EAECEF' }}>
+                      <label
+                        className="flex items-center gap-2 text-sm font-semibold"
+                        style={{ color: '#EAECEF' }}
+                      >
                         <Key className="w-4 h-4" style={{ color: '#F0B90B' }} />
                         {t('passphrase', language)}
                       </label>
@@ -611,33 +975,64 @@ export function ExchangeConfigModal({
                             : t('enterPassphrase', language)
                         }
                         className="w-full px-4 py-3 rounded-xl"
-                        style={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF' }}
+                        style={{
+                          background: '#0B0E11',
+                          border: '1px solid #2B3139',
+                          color: '#EAECEF',
+                        }}
                         required
                       />
                     </div>
                   )}
 
                   {currentExchangeType === 'binance' && (
-                    <div className="p-4 rounded-xl" style={{ background: 'rgba(240, 185, 11, 0.1)', border: '1px solid rgba(240, 185, 11, 0.2)' }}>
-                      <div className="text-sm font-semibold mb-2" style={{ color: '#F0B90B' }}>
+                    <div
+                      className="p-4 rounded-xl"
+                      style={{
+                        background: 'rgba(240, 185, 11, 0.1)',
+                        border: '1px solid rgba(240, 185, 11, 0.2)',
+                      }}
+                    >
+                      <div
+                        className="text-sm font-semibold mb-2"
+                        style={{ color: '#F0B90B' }}
+                      >
                         {t('whitelistIP', language)}
                       </div>
-                      <div className="text-xs mb-3" style={{ color: '#848E9C' }}>
+                      <div
+                        className="text-xs mb-3"
+                        style={{ color: '#848E9C' }}
+                      >
                         {t('whitelistIPDesc', language)}
                       </div>
                       {loadingIP ? (
-                        <div className="text-xs" style={{ color: '#848E9C' }}>{t('loadingServerIP', language)}</div>
+                        <div className="text-xs" style={{ color: '#848E9C' }}>
+                          {t('loadingServerIP', language)}
+                        </div>
                       ) : serverIP?.public_ip ? (
-                        <div className="flex items-center gap-2 p-3 rounded-lg" style={{ background: '#0B0E11' }}>
-                          <code className="flex-1 text-sm font-mono" style={{ color: '#F0B90B' }}>{serverIP.public_ip}</code>
+                        <div
+                          className="flex items-center gap-2 p-3 rounded-lg"
+                          style={{ background: '#0B0E11' }}
+                        >
+                          <code
+                            className="flex-1 text-sm font-mono"
+                            style={{ color: '#F0B90B' }}
+                          >
+                            {serverIP.public_ip}
+                          </code>
                           <button
                             type="button"
                             onClick={() => handleCopyIP(serverIP.public_ip)}
                             className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all hover:scale-105"
-                            style={{ background: 'rgba(240, 185, 11, 0.2)', color: '#F0B90B' }}
+                            style={{
+                              background: 'rgba(240, 185, 11, 0.2)',
+                              color: '#F0B90B',
+                            }}
                           >
                             <Copy className="w-3 h-3" />
-                            {copiedIP ? t('ipCopied', language) : t('copyIP', language)}
+                            {copiedIP
+                              ? t('ipCopied', language)
+                              : t('copyIP', language)}
                           </button>
                         </div>
                       ) : null}
@@ -649,41 +1044,108 @@ export function ExchangeConfigModal({
               {/* Aster Fields */}
               {currentExchangeType === 'aster' && (
                 <>
-                  <div className="p-4 rounded-xl" style={{ background: 'rgba(139, 92, 246, 0.1)', border: '1px solid rgba(139, 92, 246, 0.3)' }}>
+                  <div
+                    className="p-4 rounded-xl"
+                    style={{
+                      background: 'rgba(139, 92, 246, 0.1)',
+                      border: '1px solid rgba(139, 92, 246, 0.3)',
+                    }}
+                  >
                     <div className="flex items-start gap-2">
                       <span style={{ fontSize: '16px' }}>🔐</span>
                       <div>
-                        <div className="text-sm font-semibold mb-1" style={{ color: '#A78BFA' }}>{t('asterApiProTitle', language)}</div>
-                        <div className="text-xs" style={{ color: '#848E9C' }}>{t('asterApiProDesc', language)}</div>
+                        <div
+                          className="text-sm font-semibold mb-1"
+                          style={{ color: '#A78BFA' }}
+                        >
+                          {t('asterApiProTitle', language)}
+                        </div>
+                        <div className="text-xs" style={{ color: '#848E9C' }}>
+                          {t('asterApiProDesc', language)}
+                        </div>
                       </div>
                     </div>
                   </div>
                   <div className="space-y-2">
-                    <label className="flex items-center gap-2 text-sm font-semibold" style={{ color: '#EAECEF' }}>
+                    <label
+                      className="flex items-center gap-2 text-sm font-semibold"
+                      style={{ color: '#EAECEF' }}
+                    >
                       {t('asterUserLabel', language)}
                       <Tooltip content={t('asterUserDesc', language)}>
-                        <HelpCircle className="w-4 h-4 cursor-help" style={{ color: '#A78BFA' }} />
+                        <HelpCircle
+                          className="w-4 h-4 cursor-help"
+                          style={{ color: '#A78BFA' }}
+                        />
                       </Tooltip>
                     </label>
-                    <input type="text" value={asterUser} onChange={(e) => setAsterUser(e.target.value)} placeholder={t('enterAsterUser', language)} className="w-full px-4 py-3 rounded-xl" style={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF' }} required />
+                    <input
+                      type="text"
+                      value={asterUser}
+                      onChange={(e) => setAsterUser(e.target.value)}
+                      placeholder={t('enterAsterUser', language)}
+                      className="w-full px-4 py-3 rounded-xl"
+                      style={{
+                        background: '#0B0E11',
+                        border: '1px solid #2B3139',
+                        color: '#EAECEF',
+                      }}
+                      required
+                    />
                   </div>
                   <div className="space-y-2">
-                    <label className="flex items-center gap-2 text-sm font-semibold" style={{ color: '#EAECEF' }}>
+                    <label
+                      className="flex items-center gap-2 text-sm font-semibold"
+                      style={{ color: '#EAECEF' }}
+                    >
                       {t('asterSignerLabel', language)}
                       <Tooltip content={t('asterSignerDesc', language)}>
-                        <HelpCircle className="w-4 h-4 cursor-help" style={{ color: '#A78BFA' }} />
+                        <HelpCircle
+                          className="w-4 h-4 cursor-help"
+                          style={{ color: '#A78BFA' }}
+                        />
                       </Tooltip>
                     </label>
-                    <input type="text" value={asterSigner} onChange={(e) => setAsterSigner(e.target.value)} placeholder={t('enterAsterSigner', language)} className="w-full px-4 py-3 rounded-xl" style={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF' }} required />
+                    <input
+                      type="text"
+                      value={asterSigner}
+                      onChange={(e) => setAsterSigner(e.target.value)}
+                      placeholder={t('enterAsterSigner', language)}
+                      className="w-full px-4 py-3 rounded-xl"
+                      style={{
+                        background: '#0B0E11',
+                        border: '1px solid #2B3139',
+                        color: '#EAECEF',
+                      }}
+                      required
+                    />
                   </div>
                   <div className="space-y-2">
-                    <label className="flex items-center gap-2 text-sm font-semibold" style={{ color: '#EAECEF' }}>
+                    <label
+                      className="flex items-center gap-2 text-sm font-semibold"
+                      style={{ color: '#EAECEF' }}
+                    >
                       {t('asterPrivateKeyLabel', language)}
                       <Tooltip content={t('asterPrivateKeyDesc', language)}>
-                        <HelpCircle className="w-4 h-4 cursor-help" style={{ color: '#A78BFA' }} />
+                        <HelpCircle
+                          className="w-4 h-4 cursor-help"
+                          style={{ color: '#A78BFA' }}
+                        />
                       </Tooltip>
                     </label>
-                    <input type="password" value={asterPrivateKey} onChange={(e) => setAsterPrivateKey(e.target.value)} placeholder={t('enterAsterPrivateKey', language)} className="w-full px-4 py-3 rounded-xl" style={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF' }} required />
+                    <input
+                      type="password"
+                      value={asterPrivateKey}
+                      onChange={(e) => setAsterPrivateKey(e.target.value)}
+                      placeholder={t('enterAsterPrivateKey', language)}
+                      className="w-full px-4 py-3 rounded-xl"
+                      style={{
+                        background: '#0B0E11',
+                        border: '1px solid #2B3139',
+                        color: '#EAECEF',
+                      }}
+                      required
+                    />
                   </div>
                 </>
               )}
@@ -691,27 +1153,86 @@ export function ExchangeConfigModal({
               {/* Hyperliquid Fields */}
               {currentExchangeType === 'hyperliquid' && (
                 <>
-                  <div className="p-4 rounded-xl" style={{ background: 'rgba(127, 231, 204, 0.1)', border: '1px solid rgba(127, 231, 204, 0.3)' }}>
+                  <div
+                    className="p-4 rounded-xl"
+                    style={{
+                      background: 'rgba(127, 231, 204, 0.1)',
+                      border: '1px solid rgba(127, 231, 204, 0.3)',
+                    }}
+                  >
                     <div className="flex items-start gap-2">
                       <span style={{ fontSize: '16px' }}>🔐</span>
                       <div>
-                        <div className="text-sm font-semibold mb-1" style={{ color: '#7FE7CC' }}>{t('hyperliquidAgentWalletTitle', language)}</div>
-                        <div className="text-xs" style={{ color: '#848E9C' }}>{t('hyperliquidAgentWalletDesc', language)}</div>
+                        <div
+                          className="text-sm font-semibold mb-1"
+                          style={{ color: '#7FE7CC' }}
+                        >
+                          {t('hyperliquidAgentWalletTitle', language)}
+                        </div>
+                        <div className="text-xs" style={{ color: '#848E9C' }}>
+                          {t('hyperliquidAgentWalletDesc', language)}
+                        </div>
                       </div>
                     </div>
                   </div>
                   <div className="space-y-2">
-                    <label className="text-sm font-semibold" style={{ color: '#EAECEF' }}>{t('hyperliquidAgentPrivateKey', language)}</label>
+                    <label
+                      className="text-sm font-semibold"
+                      style={{ color: '#EAECEF' }}
+                    >
+                      {t('hyperliquidAgentPrivateKey', language)}
+                    </label>
                     <div className="flex gap-2">
-                      <input type="text" value={maskSecret(apiKey)} readOnly placeholder={t('enterHyperliquidAgentPrivateKey', language)} className="flex-1 px-4 py-3 rounded-xl" style={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF' }} />
-                      <button type="button" onClick={() => setSecureInputTarget('hyperliquid')} className="px-4 py-3 rounded-xl text-sm font-semibold transition-all hover:scale-105" style={{ background: '#7FE7CC', color: '#000' }}>
-                        {apiKey ? t('secureInputReenter', language) : t('secureInputButton', language)}
+                      <input
+                        type="text"
+                        value={maskSecret(apiKey)}
+                        readOnly
+                        placeholder={t(
+                          'enterHyperliquidAgentPrivateKey',
+                          language
+                        )}
+                        className="flex-1 px-4 py-3 rounded-xl"
+                        style={{
+                          background: '#0B0E11',
+                          border: '1px solid #2B3139',
+                          color: '#EAECEF',
+                        }}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setSecureInputTarget('hyperliquid')}
+                        className="px-4 py-3 rounded-xl text-sm font-semibold transition-all hover:scale-105"
+                        style={{ background: '#7FE7CC', color: '#000' }}
+                      >
+                        {apiKey
+                          ? t('secureInputReenter', language)
+                          : t('secureInputButton', language)}
                       </button>
                     </div>
                   </div>
                   <div className="space-y-2">
-                    <label className="text-sm font-semibold" style={{ color: '#EAECEF' }}>{t('hyperliquidMainWalletAddress', language)}</label>
-                    <input type="text" value={hyperliquidWalletAddr} onChange={(e) => setHyperliquidWalletAddr(e.target.value)} placeholder={t('enterHyperliquidMainWalletAddress', language)} className="w-full px-4 py-3 rounded-xl" style={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF' }} required />
+                    <label
+                      className="text-sm font-semibold"
+                      style={{ color: '#EAECEF' }}
+                    >
+                      {t('hyperliquidMainWalletAddress', language)}
+                    </label>
+                    <input
+                      type="text"
+                      value={hyperliquidWalletAddr}
+                      onChange={(e) => setHyperliquidWalletAddr(e.target.value)}
+                      placeholder={t(
+                        'enterHyperliquidMainWalletAddress',
+                        language
+                      )}
+                      className="w-full px-4 py-3 rounded-xl"
+                      style={{
+                        background: '#0B0E11',
+                        border: '1px solid #2B3139',
+                        color: '#EAECEF',
+                      }}
+                      required
+                    />
                   </div>
                 </>
               )}
@@ -719,11 +1240,20 @@ export function ExchangeConfigModal({
               {/* Lighter Fields */}
               {currentExchangeType === 'lighter' && (
                 <>
-                  <div className="p-4 rounded-xl" style={{ background: 'rgba(59, 130, 246, 0.1)', border: '1px solid rgba(59, 130, 246, 0.3)' }}>
+                  <div
+                    className="p-4 rounded-xl"
+                    style={{
+                      background: 'rgba(59, 130, 246, 0.1)',
+                      border: '1px solid rgba(59, 130, 246, 0.3)',
+                    }}
+                  >
                     <div className="flex items-start gap-2">
                       <span style={{ fontSize: '16px' }}>🔐</span>
                       <div>
-                        <div className="text-sm font-semibold mb-1" style={{ color: '#3B82F6' }}>
+                        <div
+                          className="text-sm font-semibold mb-1"
+                          style={{ color: '#3B82F6' }}
+                        >
                           {t('exchangeConfig.lighterApiKeySetup', language)}
                         </div>
                         <div className="text-xs" style={{ color: '#848E9C' }}>
@@ -733,32 +1263,105 @@ export function ExchangeConfigModal({
                     </div>
                   </div>
                   <div className="space-y-2">
-                    <label className="text-sm font-semibold" style={{ color: '#EAECEF' }}>{t('lighterWalletAddress', language)} *</label>
-                    <input type="text" value={lighterWalletAddr} onChange={(e) => setLighterWalletAddr(e.target.value)} placeholder={t('enterLighterWalletAddress', language)} className="w-full px-4 py-3 rounded-xl" style={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF' }} required />
-                  </div>
-                  <div className="space-y-2">
-                    <label className="flex items-center gap-2 text-sm font-semibold" style={{ color: '#EAECEF' }}>
-                      {t('lighterApiKeyPrivateKey', language)} *
-                      <button type="button" onClick={() => setSecureInputTarget('lighter')} className="text-xs underline" style={{ color: '#3B82F6' }}>{t('secureInputButton', language)}</button>
+                    <label
+                      className="text-sm font-semibold"
+                      style={{ color: '#EAECEF' }}
+                    >
+                      {t('lighterWalletAddress', language)} *
                     </label>
-                    <input type="password" value={lighterApiKeyPrivateKey} onChange={(e) => setLighterApiKeyPrivateKey(e.target.value)} placeholder={t('enterLighterApiKeyPrivateKey', language)} className="w-full px-4 py-3 rounded-xl font-mono" style={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF' }} required />
+                    <input
+                      type="text"
+                      value={lighterWalletAddr}
+                      onChange={(e) => setLighterWalletAddr(e.target.value)}
+                      placeholder={t('enterLighterWalletAddress', language)}
+                      className="w-full px-4 py-3 rounded-xl"
+                      style={{
+                        background: '#0B0E11',
+                        border: '1px solid #2B3139',
+                        color: '#EAECEF',
+                      }}
+                      required
+                    />
                   </div>
                   <div className="space-y-2">
-                    <label className="flex items-center gap-2 text-sm font-semibold" style={{ color: '#EAECEF' }}>
+                    <label
+                      className="flex items-center gap-2 text-sm font-semibold"
+                      style={{ color: '#EAECEF' }}
+                    >
+                      {t('lighterApiKeyPrivateKey', language)} *
+                      <button
+                        type="button"
+                        onClick={() => setSecureInputTarget('lighter')}
+                        className="text-xs underline"
+                        style={{ color: '#3B82F6' }}
+                      >
+                        {t('secureInputButton', language)}
+                      </button>
+                    </label>
+                    <input
+                      type="password"
+                      value={lighterApiKeyPrivateKey}
+                      onChange={(e) =>
+                        setLighterApiKeyPrivateKey(e.target.value)
+                      }
+                      placeholder={t('enterLighterApiKeyPrivateKey', language)}
+                      className="w-full px-4 py-3 rounded-xl font-mono"
+                      style={{
+                        background: '#0B0E11',
+                        border: '1px solid #2B3139',
+                        color: '#EAECEF',
+                      }}
+                      required
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label
+                      className="flex items-center gap-2 text-sm font-semibold"
+                      style={{ color: '#EAECEF' }}
+                    >
                       {t('exchangeConfig.apiKeyIndex', language)}
-                      <Tooltip content={t('exchangeConfig.apiKeyIndexTooltip', language)}>
-                        <HelpCircle className="w-4 h-4 cursor-help" style={{ color: '#3B82F6' }} />
+                      <Tooltip
+                        content={t(
+                          'exchangeConfig.apiKeyIndexTooltip',
+                          language
+                        )}
+                      >
+                        <HelpCircle
+                          className="w-4 h-4 cursor-help"
+                          style={{ color: '#3B82F6' }}
+                        />
                       </Tooltip>
                     </label>
-                    <input type="number" min={0} max={255} value={lighterApiKeyIndex} onChange={(e) => setLighterApiKeyIndex(parseInt(e.target.value) || 0)} className="w-full px-4 py-3 rounded-xl" style={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF' }} />
+                    <input
+                      type="number"
+                      min={0}
+                      max={255}
+                      value={lighterApiKeyIndex}
+                      onChange={(e) =>
+                        setLighterApiKeyIndex(parseInt(e.target.value) || 0)
+                      }
+                      className="w-full px-4 py-3 rounded-xl"
+                      style={{
+                        background: '#0B0E11',
+                        border: '1px solid #2B3139',
+                        color: '#EAECEF',
+                      }}
+                    />
                   </div>
                 </>
               )}
 
               {/* Buttons */}
               <div className="flex gap-3 pt-4">
-                <button type="button" onClick={handleBack} className="flex-1 px-4 py-3 rounded-xl text-sm font-semibold transition-all hover:bg-white/5" style={{ background: '#2B3139', color: '#848E9C' }}>
-                  {editingExchangeId ? t('cancel', language) : t('exchangeConfig.back', language)}
+                <button
+                  type="button"
+                  onClick={handleBack}
+                  className="flex-1 px-4 py-3 rounded-xl text-sm font-semibold transition-all hover:bg-white/5"
+                  style={{ background: '#2B3139', color: '#848E9C' }}
+                >
+                  {editingExchangeId
+                    ? t('cancel', language)
+                    : t('exchangeConfig.back', language)}
                 </button>
                 <button
                   type="submit"
@@ -766,8 +1369,13 @@ export function ExchangeConfigModal({
                   className="flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-xl text-sm font-bold transition-all hover:scale-[1.02] disabled:opacity-50 disabled:cursor-not-allowed"
                   style={{ background: '#F0B90B', color: '#000' }}
                 >
-                  {isSaving ? t('saving', language) : (
-                    <>{t('saveConfig', language)} <ArrowRight className="w-4 h-4" /></>
+                  {isSaving ? (
+                    t('saving', language)
+                  ) : (
+                    <>
+                      {t('saveConfig', language)}{' '}
+                      <ArrowRight className="w-4 h-4" />
+                    </>
                   )}
                 </button>
               </div>
@@ -778,19 +1386,37 @@ export function ExchangeConfigModal({
 
       {/* Binance Guide Modal */}
       {showGuide && (
-        <div className="fixed inset-0 bg-black/75 flex items-center justify-center z-50 p-4" onClick={() => setShowGuide(false)}>
-          <div className="rounded-2xl p-6 w-full max-w-4xl" style={{ background: '#1E2329' }} onClick={(e) => e.stopPropagation()}>
+        <div
+          className="fixed inset-0 bg-black/75 flex items-center justify-center z-50 p-4"
+          onClick={() => setShowGuide(false)}
+        >
+          <div
+            className="rounded-2xl p-6 w-full max-w-4xl"
+            style={{ background: '#1E2329' }}
+            onClick={(e) => e.stopPropagation()}
+          >
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-xl font-bold flex items-center gap-2" style={{ color: '#EAECEF' }}>
+              <h3
+                className="text-xl font-bold flex items-center gap-2"
+                style={{ color: '#EAECEF' }}
+              >
                 <BookOpen className="w-6 h-6" style={{ color: '#F0B90B' }} />
                 {t('binanceSetupGuide', language)}
               </h3>
-              <button onClick={() => setShowGuide(false)} className="px-4 py-2 rounded-lg text-sm font-semibold" style={{ background: '#2B3139', color: '#848E9C' }}>
+              <button
+                onClick={() => setShowGuide(false)}
+                className="px-4 py-2 rounded-lg text-sm font-semibold"
+                style={{ background: '#2B3139', color: '#848E9C' }}
+              >
                 {t('closeGuide', language)}
               </button>
             </div>
             <div className="overflow-y-auto max-h-[80vh]">
-              <img src="/images/guide.png" alt={t('binanceSetupGuide', language)} className="w-full h-auto rounded-lg" />
+              <img
+                src="/images/guide.png"
+                alt={t('binanceSetupGuide', language)}
+                className="w-full h-auto rounded-lg"
+              />
             </div>
           </div>
         </div>
