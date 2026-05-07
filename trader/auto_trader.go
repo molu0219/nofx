@@ -1,10 +1,12 @@
 package trader
 
 import (
+	"context"
 	"fmt"
 	"github.com/ethereum/go-ethereum/crypto"
 	"nofx/kernel"
 	"nofx/logger"
+	"nofx/market/stream"
 	"nofx/mcp"
 	_ "nofx/mcp/payment"
 	_ "nofx/mcp/provider"
@@ -24,6 +26,14 @@ import (
 	"sync"
 	"time"
 )
+
+// streamWatcher adapts the stream package's per-symbol subscription helper
+// to the paper.LiveTickerOptions.Watcher interface. The package-level
+// stream.Watch is a no-op for backends that subscribe globally (Binance
+// `!markPrice@arr@1s`) and a real subscribe for per-symbol backends (Bybit).
+type streamWatcher struct{}
+
+func (streamWatcher) Watch(symbols ...string) { stream.Watch(symbols...) }
 
 func (at *AutoTrader) logTag() string {
 	if at == nil {
@@ -341,7 +351,7 @@ func NewAutoTrader(config AutoTraderConfig, st *store.Store, userID string) (*Au
 		// Pass through the framework store + exchange id so paper state
 		// survives restarts. If either is missing, paper.New falls back to
 		// pure in-memory mode.
-		trader, err = paper.New(paper.Config{
+		paperTrader, err := paper.New(paper.Config{
 			InitialBalance: paperBalance,
 			FeeBps:         fee,
 			Store:          st,
@@ -350,6 +360,16 @@ func NewAutoTrader(config AutoTraderConfig, st *store.Store, userID string) (*Au
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize paper trader: %w", err)
 		}
+		// Wire the shared websocket mark-price stream so paper trades on
+		// sub-second prices. Stop-loss / take-profit / liquidation triggers
+		// then fire as soon as the venue publishes a new mark, not 3
+		// minutes later when the next decision cycle runs.
+		streamMgr := stream.Default()
+		paperTrader.StartLiveTicker(context.Background(), paper.LiveTickerOptions{
+			Source:  streamMgr,
+			Watcher: streamWatcher{},
+		})
+		trader = paperTrader
 	default:
 		return nil, fmt.Errorf("unsupported trading platform: %s", config.Exchange)
 	}

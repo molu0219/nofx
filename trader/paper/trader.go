@@ -45,7 +45,10 @@ type FundingRateFunc func(symbol string) (float64, error)
 // uses time.Now.
 type NowFunc func() time.Time
 
-// DefaultMarkPriceFunc resolves the price via the production market data layer.
+// DefaultMarkPriceFunc resolves the price via the production market data
+// layer. Used when no stream-based source is wired; once StartLiveTicker has
+// run, the trader's getMarkPrice wrapper consults the live stream first and
+// only calls into this REST path on a stream-cache miss.
 func DefaultMarkPriceFunc(symbol string) (float64, error) {
 	d, err := market.Get(symbol)
 	if err != nil {
@@ -157,6 +160,13 @@ type Trader struct {
 	orderSeq        uint64
 	isCrossMargin   bool      // false = isolated (V1 default; liquidation math assumes isolated)
 	lastFundingTime time.Time // most recent funding boundary that has been applied
+
+	// Live-ticker state (set by StartLiveTicker in live_ticker.go). When a
+	// stream is wired, mark price lookups consult its cache before falling
+	// back to MarkPriceFunc, and a goroutine ticks tickLocked on every
+	// price update relevant to a held symbol.
+	liveTickerStarted bool
+	streamSource      streamSource
 }
 
 // Config is the paper trader configuration.
@@ -190,9 +200,9 @@ func New(cfg Config) (*Trader, error) {
 	if cfg.FeeBps < 0 {
 		return nil, fmt.Errorf("paper: FeeBps must be >= 0")
 	}
-	mp := cfg.MarkPriceFunc
-	if mp == nil {
-		mp = DefaultMarkPriceFunc
+	userMp := cfg.MarkPriceFunc
+	if userMp == nil {
+		userMp = DefaultMarkPriceFunc
 	}
 	fr := cfg.FundingRateFunc
 	if fr == nil {
@@ -211,7 +221,6 @@ func New(cfg Config) (*Trader, error) {
 
 	t := &Trader{
 		feeBps:         cfg.FeeBps,
-		getMarkPrice:   mp,
 		getFundingRate: fr,
 		now:            nw,
 		leverageBySym:  make(map[string]int),
@@ -220,6 +229,15 @@ func New(cfg Config) (*Trader, error) {
 		positions:      make(map[string]*Position),
 		orders:         make(map[string]*pendingOrder),
 		filledOrders:   make(map[string]*filledOrderRecord),
+	}
+	// Stream-first mark price: once StartLiveTicker has wired a stream
+	// source, the cache lookup wins. Otherwise fall through to whatever
+	// the caller injected (DefaultMarkPriceFunc by default).
+	t.getMarkPrice = func(symbol string) (float64, error) {
+		if p, ok := t.streamLatestMarkPrice(symbol); ok {
+			return p, nil
+		}
+		return userMp(symbol)
 	}
 
 	if persistEnabled {
