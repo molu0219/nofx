@@ -243,6 +243,10 @@ type CoinSourceConfig struct {
 	UseBinanceTop bool `json:"use_binance_top"`
 	// Binance Top maximum count (default 10, capped at MaxCandidateCoins)
 	BinanceTopLimit int `json:"binance_top_limit,omitempty"`
+	// whether to use the smart scanner (universe-wide screen with deltas)
+	UseScanner bool `json:"use_scanner"`
+	// Scanner watchlist max count (default 30, capped at MaxCandidateCoins)
+	ScannerWatchlistSize int `json:"scanner_watchlist_size,omitempty"`
 	// Note: API URLs are now built automatically using NofxOSAPIKey from IndicatorConfig
 }
 

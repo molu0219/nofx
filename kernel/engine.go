@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"nofx/kernel/scanner"
 	"nofx/logger"
 	"nofx/market"
 	"nofx/provider/hyperliquid"
@@ -418,6 +419,58 @@ func (e *StrategyEngine) GetCandidateCoins() ([]CandidateCoin, error) {
 			candidates = append(candidates, CandidateCoin{
 				Symbol:  market.Normalize(sym),
 				Sources: []string{"binance_top"},
+			})
+		}
+		return e.filterExcludedCoins(candidates), nil
+
+	case "scanner":
+		// Smart scanner: a background goroutine screens the entire USDT-M
+		// perp universe every N minutes using deltas + funding + volume,
+		// scores each symbol, and produces a watchlist with hysteresis +
+		// open-position protection. Trader picks from this curated set
+		// instead of the raw 24h-volume sort, so rotation tracks live
+		// momentum rather than yesterday's flow.
+		if !coinSource.UseScanner {
+			logger.Infof("⚠️  source_type is 'scanner' but use_scanner is false, falling back to static coins")
+			for _, symbol := range coinSource.StaticCoins {
+				symbol = market.Normalize(symbol)
+				candidates = append(candidates, CandidateCoin{
+					Symbol:  symbol,
+					Sources: []string{"static"},
+				})
+			}
+			return e.filterExcludedCoins(candidates), nil
+		}
+		watchlist := scanner.Default().Watchlist()
+		if len(watchlist) == 0 {
+			// Scanner hasn't completed its first refresh yet (process just
+			// started). Fall back to binance_top so the trader still has
+			// something to look at on its first cycle.
+			logger.Infof("⚠️  scanner watchlist not warm yet — falling back to binance_top for this cycle")
+			fallbackLimit := coinSource.ScannerWatchlistSize
+			if fallbackLimit <= 0 {
+				fallbackLimit = 30
+			}
+			symbols, err := FetchBinanceTopByVolume(fallbackLimit)
+			if err != nil {
+				return nil, err
+			}
+			for _, sym := range symbols {
+				candidates = append(candidates, CandidateCoin{
+					Symbol:  market.Normalize(sym),
+					Sources: []string{"binance_top_fallback"},
+				})
+			}
+			return e.filterExcludedCoins(candidates), nil
+		}
+		limit := coinSource.ScannerWatchlistSize
+		if limit <= 0 || limit > len(watchlist) {
+			limit = len(watchlist)
+		}
+		for _, sym := range watchlist[:limit] {
+			candidates = append(candidates, CandidateCoin{
+				Symbol:  market.Normalize(sym),
+				Sources: []string{"scanner"},
 			})
 		}
 		return e.filterExcludedCoins(candidates), nil

@@ -8,6 +8,7 @@ import (
 	"nofx/config"
 	"nofx/crypto"
 	"nofx/logger"
+	"nofx/kernel/scanner"
 	"nofx/manager"
 	"nofx/telemetry"
 	_ "nofx/mcp/payment"
@@ -105,6 +106,28 @@ func main() {
 	traderManager.SetNotifier(telegram.NewNotifier(st))
 
 	// Load all traders from database to memory (may auto-start traders with IsRunning=true)
+	// Register the open-positions resolver for the universe scanner so the
+	// watchlist always includes symbols of currently-held positions across
+	// every running trader (no PnL black hole when a position drops below
+	// the score cutoff). Scanner itself starts lazily on first lookup.
+	scanner.SetOpenPositionsResolver(func() []string {
+		seen := make(map[string]bool)
+		var out []string
+		for _, at := range traderManager.GetAllTraders() {
+			positions, err := at.GetPositions()
+			if err != nil {
+				continue
+			}
+			for _, p := range positions {
+				if sym, ok := p["symbol"].(string); ok && !seen[sym] {
+					seen[sym] = true
+					out = append(out, sym)
+				}
+			}
+		}
+		return out
+	})
+
 	if err := traderManager.LoadTradersFromStore(st); err != nil {
 		logger.Fatalf("❌ Failed to load traders: %v", err)
 	}
