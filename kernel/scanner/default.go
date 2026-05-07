@@ -64,6 +64,7 @@ func Default() *Scanner {
 
 	rule := NewRuleScorer(ScoringWeights{})
 	scorer := Scorer(rule)
+	var enricher Enricher
 	if os.Getenv("NOFX_SCANNER_SCORER") == "ai" {
 		client := mcp.NewAIClientByProvider("claudecli")
 		if client != nil {
@@ -72,7 +73,13 @@ func Default() *Scanner {
 				Top:      50, // larger than watchlist for hysteresis cushion
 				Fallback: rule,
 			}
-			logger.Infof("🔭 [scanner] using AI scorer (claudecli) with rule fallback")
+			// Enrichment is paired with the AI scorer: cheap rule prefilter
+			// narrows 561 → 100, BinanceOIEnricher fills OI/OI deltas/range_pos
+			// for those 100, and the model then reads enriched rows with
+			// substantially more signal per token. Rule-only path skips this
+			// — RuleScorer doesn't read OI, so the API budget would be wasted.
+			enricher = &BinanceOIEnricher{}
+			logger.Infof("🔭 [scanner] using AI scorer (claudecli) with rule fallback + Binance OI enrichment (top 100)")
 		} else {
 			logger.Warnf("🔭 [scanner] NOFX_SCANNER_SCORER=ai but claudecli client unavailable — falling back to rule scorer")
 		}
@@ -87,6 +94,8 @@ func Default() *Scanner {
 		FetchFunding:   BinanceFundingFetcher(),
 		Scorer:         scorer,
 		GetOpenSymbols: pendingPositionsFn,
+		Enricher:       enricher,
+		// PrefilterTopK defaults to 100 inside New() when Enricher is set.
 	})
 	go func() {
 		// Background-managed lifecycle. The scanner shuts down when the

@@ -123,6 +123,11 @@ func (a *AIScorer) Rank(entries []UniverseEntry) []string {
 }
 
 // aiScorerSystemPrompt explains the task and the strict output contract.
+//
+// The "richer fields" (OI, OI deltas, range_pos) appear only when the
+// scanner is configured with an Enricher and the row survived the
+// prefilter. Most rows will lack them — the prompt doesn't promise they're
+// present on every line, only that they appear when available.
 const aiScorerSystemPrompt = `You are a market scanner picking the most interesting USDT-margined perpetual futures for aggressive momentum trading right now.
 
 Input: a universe of every Binance USDT-M perp with these per-symbol fields:
@@ -131,11 +136,20 @@ Input: a universe of every Binance USDT-M perp with these per-symbol fields:
 - 24h quote volume in USDT
 - last published funding rate (decimal; 0.0001 = 0.01% per 8h)
 
+Some rows additionally carry:
+- open interest (in base coin units) and 10-minute / 1-hour OI percent change
+- range_pos (0..1, where the price sits inside the 24h high/low band)
+
+These richer rows came through a more expensive enrichment pass, so when
+present they're the strongest signal you have — use them.
+
 Pick the N most interesting tickers for a trader pursuing 10% daily ROI on perp momentum.
 
 What "interesting" means:
 - Strong recent momentum (large positive |Δ10m| / |Δ30m| / |Δ1h|) with volume conviction (high quote volume confirms it isn't a thin-book wick).
 - Funding rate dislocations (e.g. extreme positive funding while price climbs = crowded longs at risk; extreme negative = squeeze-prone).
+- OI confirms momentum: rising price + rising OI = new money entering (real trend); rising price + falling OI = short cover (often fades). The opposite for downtrends.
+- Range position: range_pos near 0.95+ with strong Δ24h = breakout candidate; near 0.05 with strong negative Δ24h = breakdown candidate; mid-range with high momentum = continuation through resistance.
 - Recent breakouts of multi-day ranges (use 24h % alongside short-window deltas to spot continuation).
 - AVOID stablecoin pairs (USDCUSDT, USDPUSDT, etc — by definition zero momentum).
 - AVOID extreme low volume (< $5M / 24h) — too easy to manipulate.
@@ -159,21 +173,42 @@ func buildAIScorerUserPrompt(entries []UniverseEntry, top int) string {
 	})
 
 	var sb strings.Builder
-	sb.Grow(len(sorted) * 100)
+	sb.Grow(len(sorted) * 120)
 	sb.WriteString(fmt.Sprintf("Pick the top %d most interesting USDT-M perps. Output exactly %d comma-separated symbols.\n\n", top, top))
 	sb.WriteString("Universe (sorted by 24h volume desc):\n")
 	for _, e := range sorted {
 		sb.WriteString(fmt.Sprintf(
-			"%s  $%s  Δ10m=%+0.2f%%  Δ30m=%+0.2f%%  Δ1h=%+0.2f%%  Δ24h=%+0.2f%%  vol=$%s  fund=%+0.4f%%\n",
+			"%s  $%s  Δ10m=%+0.2f%%  Δ30m=%+0.2f%%  Δ1h=%+0.2f%%  Δ24h=%+0.2f%%  vol=$%s  fund=%+0.4f%%",
 			padSymbol(e.Symbol),
 			formatPrice(e.Price),
 			e.PriceChange10m, e.PriceChange30m, e.PriceChange1h, e.PriceChange24h,
 			formatVolume(e.QuoteVolume24h),
 			e.FundingRate*100,
 		))
+		// Append enrichment fields only when present. Zero OI = not enriched
+		// (Enricher couldn't fetch this symbol or it's outside the prefilter
+		// top K). Keeping enriched rows visually distinct helps the model
+		// weight them more heavily.
+		if e.OpenInterest > 0 {
+			sb.WriteString(fmt.Sprintf(
+				"  oi=%s  oi10m=%+0.2f%%  oi1h=%+0.2f%%  rangepos=%0.2f",
+				formatOI(e.OpenInterest, e.Price),
+				e.OIChg10m, e.OIChg1h,
+				e.RangePos(),
+			))
+		}
+		sb.WriteByte('\n')
 	}
 	sb.WriteString(fmt.Sprintf("\nOutput %d comma-separated symbols now (best first):", top))
 	return sb.String()
+}
+
+// formatOI reduces base-coin OI × current price to a $B/$M/$K notional, the
+// same compact bracket the volume formatter uses. Comparing OI in dollar
+// terms across symbols is more meaningful than comparing raw base-coin units.
+func formatOI(oiBase, price float64) string {
+	notional := oiBase * price
+	return "$" + formatVolume(notional)
 }
 
 // parseAISymbolResponse extracts up to len(universe) USDT-suffixed symbols

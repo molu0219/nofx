@@ -33,6 +33,11 @@ import (
 // UniverseEntry is one symbol's snapshot the scanner produces. Everything
 // numerical the AI / scorer might want is here so consumers don't need to
 // re-fetch.
+//
+// OpenInterest + OIChg* are populated only for entries that survive the
+// prefilter step (typically top 100 by rule score) and an Enricher is
+// configured. For all other entries those fields stay zero — scorers should
+// treat zero as "not enriched", not as "actually zero OI".
 type UniverseEntry struct {
 	Symbol         string    `json:"symbol"`
 	Price          float64   `json:"price"`
@@ -44,7 +49,27 @@ type UniverseEntry struct {
 	HighPrice24h   float64   `json:"high_24h"`
 	LowPrice24h    float64   `json:"low_24h"`
 	FundingRate    float64   `json:"funding_rate"`
+	OpenInterest   float64   `json:"open_interest"`        // base-coin units; 0 = not enriched
+	OIChg10m       float64   `json:"oi_change_10m_pct"`    // % vs 1 scan ago
+	OIChg1h        float64   `json:"oi_change_1h_pct"`     // % vs 6 scans ago
 	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+// RangePos returns where the current price sits inside the 24h high/low band,
+// 0..1 (0 = at 24h low, 1 = at 24h high). Returns 0 when the band is degenerate
+// (high <= low) or price is outside it.
+func (e UniverseEntry) RangePos() float64 {
+	if e.HighPrice24h <= e.LowPrice24h {
+		return 0
+	}
+	pos := (e.Price - e.LowPrice24h) / (e.HighPrice24h - e.LowPrice24h)
+	if pos < 0 {
+		return 0
+	}
+	if pos > 1 {
+		return 1
+	}
+	return pos
 }
 
 // Scorer picks the order in which symbols should populate the watchlist.
@@ -89,6 +114,24 @@ type Config struct {
 	FetchFunding    FetchFundingFunc
 	GetOpenSymbols  PositionsFunc
 	Scorer          Scorer
+
+	// Enricher, if non-nil, fetches OI + (later) other heavy per-symbol data
+	// for the top K candidates after the cheap prefilter step. The pipeline:
+	//   tickers → deltas → Prefilter ranks all → top K go to Enricher →
+	//   Scorer ranks the (now richer) full universe.
+	// Failures are best-effort: enrichment errors are logged and the
+	// non-enriched entries fall through unchanged.
+	Enricher Enricher
+
+	// Prefilter ranks the full universe to decide which K entries get
+	// enriched. Defaults to a RuleScorer with default weights when Enricher
+	// is set; ignored otherwise. Use this to keep enrichment cost bounded.
+	Prefilter Scorer
+
+	// PrefilterTopK caps how many entries the Enricher receives. Default 100.
+	// Higher = more candidates for the AI but more API calls (Binance OI is
+	// 1 weight per symbol, so 100/min stays well under the 1200/min budget).
+	PrefilterTopK int
 }
 
 // Scanner is the long-running background screener.
@@ -125,6 +168,14 @@ func New(cfg Config) *Scanner {
 	}
 	if cfg.MissThreshold <= 0 {
 		cfg.MissThreshold = 2
+	}
+	if cfg.Enricher != nil {
+		if cfg.Prefilter == nil {
+			cfg.Prefilter = NewRuleScorer(ScoringWeights{})
+		}
+		if cfg.PrefilterTopK <= 0 {
+			cfg.PrefilterTopK = 100
+		}
 	}
 	return &Scanner{
 		cfg:          cfg,
@@ -184,6 +235,15 @@ func (s *Scanner) Refresh(ctx context.Context) error {
 	entries := s.buildEntries(tickers, funding, now)
 	s.pushHistory(now, entries)
 
+	// Prefilter + enrich: when an Enricher is wired, narrow the universe with
+	// the cheap rule scorer first, then upgrade those K entries with OI (and
+	// future indicators). The full entries slice gets mutated in place so
+	// downstream Scorer.Rank still sees the entire universe — just with
+	// richer data for the top candidates.
+	if s.cfg.Enricher != nil {
+		entries = s.enrichTopK(ctx, entries)
+	}
+
 	// Score the universe.
 	ranked := s.cfg.Scorer.Rank(entries)
 
@@ -206,6 +266,53 @@ func (s *Scanner) Refresh(ctx context.Context) error {
 		s.notifySubscribers(newList)
 	}
 	return nil
+}
+
+// enrichTopK runs the Prefilter to pick the top K most-promising entries,
+// then asks the Enricher to fill OI / etc on those. The returned slice is
+// the original entries with enriched fields filled in for picked symbols.
+// Errors from the Enricher are logged but not propagated — the universe is
+// still usable without enrichment, the AIScorer just sees thinner rows.
+func (s *Scanner) enrichTopK(ctx context.Context, entries []UniverseEntry) []UniverseEntry {
+	k := s.cfg.PrefilterTopK
+	if k <= 0 || k >= len(entries) {
+		k = len(entries)
+	}
+
+	// Index for fast in-place update after enrichment.
+	idx := make(map[string]int, len(entries))
+	for i, e := range entries {
+		idx[e.Symbol] = i
+	}
+
+	// Pick top K by prefilter rank (or all if smaller).
+	picked := make([]UniverseEntry, 0, k)
+	for _, sym := range s.cfg.Prefilter.Rank(entries) {
+		if len(picked) >= k {
+			break
+		}
+		if i, ok := idx[sym]; ok {
+			picked = append(picked, entries[i])
+		}
+	}
+
+	enriched, err := s.cfg.Enricher.Enrich(ctx, picked)
+	if err != nil {
+		logger.Warnf("🔭 [scanner] enrichment failed (top %d): %v — continuing with thin entries", k, err)
+		return entries
+	}
+
+	// Merge enriched fields back into the universe slice.
+	for _, e := range enriched {
+		i, ok := idx[e.Symbol]
+		if !ok {
+			continue
+		}
+		entries[i].OpenInterest = e.OpenInterest
+		entries[i].OIChg10m = e.OIChg10m
+		entries[i].OIChg1h = e.OIChg1h
+	}
+	return entries
 }
 
 // buildEntries enriches each ticker with deltas from the price history.

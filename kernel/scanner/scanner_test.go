@@ -217,3 +217,67 @@ func contains(s []string, x string) bool {
 	}
 	return false
 }
+
+// --- Prefilter + Enricher pipeline -----------------------------------------
+
+func TestScanner_EnrichmentRunsOnlyOnPrefilterTopK(t *testing.T) {
+	// 5 symbols in the universe, prefilter keeps top 2 by RuleScorer (volume desc),
+	// enricher should see exactly those 2 — not the whole 5.
+	enricher := &fakeEnricher{supply: map[string]float64{
+		"BTCUSDT": 1_000_000,
+		"ETHUSDT": 500_000,
+	}}
+	s := mkScannerWithFakeTickers(t,
+		[][]TickerSnapshot{{
+			tk("BTCUSDT", 100, 1_000_000),
+			tk("ETHUSDT", 50, 500_000),
+			tk("SOLUSDT", 10, 200_000),
+			tk("XRPUSDT", 1, 100_000),
+			tk("DOGEUSDT", 0.1, 50_000),
+		}},
+		func(c *Config) {
+			c.Enricher = enricher
+			c.PrefilterTopK = 2
+			c.WatchlistSize = 5
+		},
+	)
+	if err := s.Refresh(context.Background()); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if enricher.called != 1 {
+		t.Fatalf("enricher should be called once per refresh, got %d", enricher.called)
+	}
+	if len(enricher.gotSyms) != 2 {
+		t.Fatalf("enricher should see exactly 2 symbols (PrefilterTopK), got %v", enricher.gotSyms)
+	}
+	got := map[string]bool{}
+	for _, s := range enricher.gotSyms {
+		got[s] = true
+	}
+	if !got["BTCUSDT"] || !got["ETHUSDT"] {
+		t.Fatalf("expected BTC + ETH (top 2 by volume), got %v", enricher.gotSyms)
+	}
+
+	// And the entries that came through enrichment should now have OI set.
+	snap := s.Snapshot()
+	for _, e := range snap {
+		if e.Symbol == "BTCUSDT" && e.OpenInterest == 0 {
+			t.Fatal("BTC should have OI populated")
+		}
+		if e.Symbol == "DOGEUSDT" && e.OpenInterest != 0 {
+			t.Fatal("DOGE was outside prefilter top-K, should stay zero")
+		}
+	}
+}
+
+func TestScanner_NoEnricher_NoPrefilterRequired(t *testing.T) {
+	// Sanity: when Enricher is nil, scanner doesn't require Prefilter — works
+	// like the original single-stage path.
+	s := mkScannerWithFakeTickers(t, [][]TickerSnapshot{{
+		tk("BTCUSDT", 100, 1_000_000),
+		tk("ETHUSDT", 50, 500_000),
+	}})
+	if err := s.Refresh(context.Background()); err != nil {
+		t.Fatalf("refresh without enricher: %v", err)
+	}
+}

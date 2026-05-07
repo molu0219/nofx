@@ -197,6 +197,41 @@ func TestFormatVolume_Brackets(t *testing.T) {
 	}
 }
 
+func TestBuildAIScorerUserPrompt_OmitsOIFieldsWhenNotEnriched(t *testing.T) {
+	entries := mkUniverse("BTCUSDT", "ETHUSDT")
+	prompt := buildAIScorerUserPrompt(entries, 1)
+	// OI markers must NOT appear when entries weren't enriched.
+	if strings.Contains(prompt, "oi=") || strings.Contains(prompt, "rangepos=") {
+		t.Fatalf("unenriched prompt should omit oi/rangepos markers; got: %s", prompt)
+	}
+}
+
+func TestBuildAIScorerUserPrompt_IncludesOIFieldsWhenEnriched(t *testing.T) {
+	entries := mkUniverse("BTCUSDT", "ETHUSDT")
+	// Enrich BTC only; ETH stays thin.
+	entries[0].OpenInterest = 100_000
+	entries[0].OIChg10m = 2.5
+	entries[0].OIChg1h = -3.5
+	entries[0].HighPrice24h = 110
+	entries[0].LowPrice24h = 90
+	entries[0].Price = 100
+	prompt := buildAIScorerUserPrompt(entries, 1)
+	if !strings.Contains(prompt, "oi=") {
+		t.Fatalf("enriched prompt should include oi= marker for BTC: %s", prompt)
+	}
+	if !strings.Contains(prompt, "oi10m=+2.50%") {
+		t.Fatalf("enriched prompt should include oi10m delta: %s", prompt)
+	}
+	if !strings.Contains(prompt, "rangepos=0.50") {
+		t.Fatalf("range_pos = (100-90)/(110-90) = 0.50 not in prompt: %s", prompt)
+	}
+	// ETH had no OI → must NOT have oi= on its line. Easiest check: it should
+	// only appear once (BTC's line).
+	if c := strings.Count(prompt, "oi="); c != 1 {
+		t.Fatalf("oi= should appear on exactly 1 line, got %d (\nprompt: %s)", c, prompt)
+	}
+}
+
 // Sanity: scorer interface is satisfied.
 func TestAIScorer_ImplementsScorer(t *testing.T) {
 	var _ Scorer = (*AIScorer)(nil)
