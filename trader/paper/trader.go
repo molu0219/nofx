@@ -117,6 +117,22 @@ const MaintenanceMarginRate = 0.004
 // framework's trader_orders/decision_records tables.
 const closedRecordCap = 500
 
+// filledOrderRecord remembers the fill details for an instant-fill paper order
+// (open / close at market) so GetOrderStatus can answer FILLED when the
+// framework polls it after submission. Not persisted — these queries happen
+// within seconds of placement, well inside one process lifetime.
+type filledOrderRecord struct {
+	symbol      string
+	avgPrice    float64
+	executedQty float64
+	commission  float64
+	createdAt   time.Time
+}
+
+// filledOrderRetention bounds how long we remember filled order details.
+// Framework polls within ~2.5s; 5 minutes is generous and keeps the map small.
+const filledOrderRetention = 5 * time.Minute
+
 // Trader is the in-memory virtual exchange.
 type Trader struct {
 	mu sync.RWMutex
@@ -137,6 +153,7 @@ type Trader struct {
 	positions       map[string]*Position     // by symbol
 	orders          map[string]*pendingOrder // pending stop-loss / take-profit / limit orders
 	closed          []types.ClosedPnLRecord
+	filledOrders    map[string]*filledOrderRecord // recent instant-fill records, looked up by GetOrderStatus
 	orderSeq        uint64
 	isCrossMargin   bool      // false = isolated (V1 default; liquidation math assumes isolated)
 	lastFundingTime time.Time // most recent funding boundary that has been applied
@@ -202,6 +219,7 @@ func New(cfg Config) (*Trader, error) {
 		exchangeID:     cfg.ExchangeID,
 		positions:      make(map[string]*Position),
 		orders:         make(map[string]*pendingOrder),
+		filledOrders:   make(map[string]*filledOrderRecord),
 	}
 
 	if persistEnabled {
@@ -507,6 +525,7 @@ func (t *Trader) openPosition(symbol, side string, quantity float64, leverage in
 	t.balance -= fee
 
 	id := t.nextOrderID("OPEN")
+	t.recordFilledOrderLocked(id, symbol, price, quantity, fee)
 	logger.Infof("📄 [paper] OPEN %s %s qty=%.6f @ %.4f lev=%dx fee=%.4f balance=%.2f",
 		strings.ToUpper(side), symbol, quantity, price, leverage, fee, t.balance)
 
@@ -583,6 +602,7 @@ func (t *Trader) closePosition(symbol, expectedSide string, quantity float64) (m
 		pos.Quantity -= closeQty
 	}
 
+	t.recordFilledOrderLocked(rec.OrderID, symbol, price, closeQty, fee)
 	logger.Infof("📄 [paper] CLOSE %s %s qty=%.6f @ %.4f realized=%.4f fee=%.4f balance=%.2f",
 		strings.ToUpper(pos.Side), symbol, closeQty, price, realized, fee, t.balance)
 
@@ -749,9 +769,13 @@ func (t *Trader) FormatQuantity(symbol string, quantity float64) (string, error)
 }
 
 // GetOrderStatus reports order status for a paper order ID.
-//   - market open/close orders fill instantly so we report FILLED via closed history;
+//   - instant-fill open/close orders are returned as FILLED via filledOrders;
 //   - pending stop/TP orders report NEW;
 //   - unknown IDs return CANCELED to keep the caller flow unblocked.
+//
+// The framework polls this within ~2.5s of submission to confirm the fill
+// before recording an entry in trader_orders, so the in-memory filledOrders
+// map (5-minute retention) is sufficient — no persistence needed.
 func (t *Trader) GetOrderStatus(symbol, orderID string) (map[string]interface{}, error) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -763,6 +787,15 @@ func (t *Trader) GetOrderStatus(symbol, orderID string) (map[string]interface{},
 			"avgPrice":    0.0,
 			"executedQty": 0.0,
 			"commission":  0.0,
+		}, nil
+	}
+	if rec, ok := t.filledOrders[orderID]; ok {
+		return map[string]interface{}{
+			"status":      "FILLED",
+			"symbol":      rec.symbol,
+			"avgPrice":    rec.avgPrice,
+			"executedQty": rec.executedQty,
+			"commission":  rec.commission,
 		}, nil
 	}
 	for _, rec := range t.closed {
@@ -783,6 +816,28 @@ func (t *Trader) GetOrderStatus(symbol, orderID string) (map[string]interface{},
 		"executedQty": 0.0,
 		"commission":  0.0,
 	}, nil
+}
+
+// recordFilledOrderLocked stores a synthetic fill record so subsequent
+// GetOrderStatus calls answer FILLED for instant-fill paper orders. Caller
+// MUST hold t.mu (write). Old entries are pruned opportunistically.
+func (t *Trader) recordFilledOrderLocked(orderID, symbol string, price, qty, fee float64) {
+	now := t.now()
+	t.filledOrders[orderID] = &filledOrderRecord{
+		symbol:      symbol,
+		avgPrice:    price,
+		executedQty: qty,
+		commission:  fee,
+		createdAt:   now,
+	}
+	// Cheap GC — only walks when the map grows; bounded by retention window.
+	if len(t.filledOrders) > 64 {
+		for id, rec := range t.filledOrders {
+			if now.Sub(rec.createdAt) > filledOrderRetention {
+				delete(t.filledOrders, id)
+			}
+		}
+	}
 }
 
 // GetClosedPnL returns realized close records since startTime, capped to limit.

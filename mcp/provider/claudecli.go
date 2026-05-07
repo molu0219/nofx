@@ -138,8 +138,13 @@ func (c *ClaudeCLIClient) CallWithMessages(systemPrompt, userPrompt string) (str
 
 	start := time.Now()
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("claudecli: run failed after %s: %w (stderr: %s)",
-			time.Since(start).Truncate(time.Millisecond), err, truncate(stderr.String(), 400))
+		// Claude CLI sometimes prints fatal errors to stdout (the JSON output
+		// stream) rather than stderr, especially for argv-validation issues.
+		// Surface both so debugging doesn't require running the binary by hand.
+		return "", fmt.Errorf("claudecli: run failed after %s: %w (stderr: %s | stdout: %s)",
+			time.Since(start).Truncate(time.Millisecond), err,
+			truncate(stderr.String(), 400),
+			truncate(stdout.String(), 400))
 	}
 
 	out := strings.TrimSpace(stdout.String())
