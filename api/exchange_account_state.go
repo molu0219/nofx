@@ -343,6 +343,8 @@ func missingExchangeCredentials(exchangeCfg *store.Exchange) (status string, cod
 		if exchangeCfg.LighterWalletAddr == "" || exchangeCfg.LighterAPIKeyPrivateKey == "" {
 			return exchangeAccountStatusMissingCredentials, "MISSING_REQUIRED_FIELDS", "Wallet address and API key private key are required", true
 		}
+	case "paper":
+		// Paper exchange runs locally — no credentials to check.
 	default:
 		return exchangeAccountStatusUnavailable, "UNSUPPORTED_EXCHANGE", "Unsupported exchange type", true
 	}

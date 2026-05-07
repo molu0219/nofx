@@ -167,7 +167,7 @@ func validateExchangeForTraderCreation(exchange *store.Exchange) (string, string
 	}
 
 	switch exchange.ExchangeType {
-	case "binance", "bybit", "okx", "bitget", "gate", "kucoin", "hyperliquid", "aster", "lighter", "indodax":
+	case "binance", "bybit", "okx", "bitget", "gate", "kucoin", "hyperliquid", "aster", "lighter", "indodax", "paper":
 		return "", "", nil
 	default:
 		return formatTraderCreationError(
@@ -349,7 +349,10 @@ func (s *Server) handleCreateTrader(c *gin.Context) {
 		), "trader.create.model_disabled", mapStringPairs("model_name", model.Name))
 		return
 	}
-	if model.APIKey == "" {
+	// claudecli runs the local `claude` binary and authenticates via the binary's
+	// own OAuth subscription / env — no NOFX-side API key is needed. Skip the
+	// credential check for that provider only.
+	if model.APIKey == "" && model.Provider != "claudecli" {
 		SafeBadRequestWithDetails(c, formatTraderCreationError(
 			fmt.Sprintf("AI 模型「%s」缺少 API Key 或支付凭证", model.Name),
 			"请前往「设置 > 模型配置」补全模型凭证后，再重新创建机器人",
