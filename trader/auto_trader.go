@@ -330,7 +330,15 @@ func NewAutoTrader(config AutoTraderConfig, st *store.Store, userID string) (*Au
 		if fee == 0 {
 			fee = 5 // 0.05% taker, generic CEX baseline
 		}
-		trader, err = paper.New(paper.Config{InitialBalance: paperBalance, FeeBps: fee})
+		// Pass through the framework store + exchange id so paper state
+		// survives restarts. If either is missing, paper.New falls back to
+		// pure in-memory mode.
+		trader, err = paper.New(paper.Config{
+			InitialBalance: paperBalance,
+			FeeBps:         fee,
+			Store:          st,
+			ExchangeID:     config.ExchangeID,
+		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize paper trader: %w", err)
 		}

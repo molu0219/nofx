@@ -20,6 +20,7 @@
 package paper
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -28,6 +29,7 @@ import (
 
 	"nofx/logger"
 	"nofx/market"
+	"nofx/store"
 	"nofx/trader/types"
 )
 
@@ -83,6 +85,11 @@ type pendingOrder struct {
 // vary by symbol and tier — V1 uses a single rate for simplicity.
 const MaintenanceMarginRate = 0.004
 
+// closedRecordCap caps how many closed PnL records are retained in memory and
+// persisted. Older records are dropped — long-term history belongs in the
+// framework's trader_orders/decision_records tables.
+const closedRecordCap = 500
+
 // Trader is the in-memory virtual exchange.
 type Trader struct {
 	mu sync.RWMutex
@@ -91,6 +98,10 @@ type Trader struct {
 	feeBps        float64       // taker fee in basis points; e.g. 5 = 0.05%
 	getMarkPrice  MarkPriceFunc // injectable for tests
 	leverageBySym map[string]int
+
+	// Persistence — optional. Both must be set together or both nil/empty.
+	store      *store.Store
+	exchangeID string
 
 	// Mutable state.
 	balance       float64                  // wallet balance (USDT). Only fees, realized PnL, and liquidation losses move this.
@@ -103,9 +114,16 @@ type Trader struct {
 
 // Config is the paper trader configuration.
 type Config struct {
-	InitialBalance float64       // starting USDT balance; required (>0)
+	InitialBalance float64       // starting USDT balance; required (>0) when no persisted state exists
 	FeeBps         float64       // optional taker fee bps (default 5)
 	MarkPriceFunc  MarkPriceFunc // optional override (defaults to live market data)
+
+	// Persistence (both required together, both optional). When provided, the
+	// trader hydrates from store on construction and writes the full state
+	// back after every mutation. When omitted, the trader is purely in-memory
+	// and resets on restart.
+	Store      *store.Store
+	ExchangeID string
 }
 
 // New constructs a paper Trader.
@@ -113,10 +131,13 @@ type Config struct {
 // FeeBps is honoured exactly: zero means zero fees. Negative values are rejected.
 // Callers wiring the paper trader into auto_trader.go should pass an explicit
 // fee (5 bps is a reasonable default for a generic CEX).
+//
+// When cfg.Store and cfg.ExchangeID are both set, the trader hydrates state
+// from the persisted row. If no row exists, it initializes with cfg.InitialBalance
+// and immediately writes a fresh row. Subsequent mutations persist after each
+// state change. When persistence is not configured, the trader is in-memory only
+// and resets on process restart.
 func New(cfg Config) (*Trader, error) {
-	if cfg.InitialBalance <= 0 {
-		return nil, fmt.Errorf("paper: InitialBalance must be > 0")
-	}
 	if cfg.FeeBps < 0 {
 		return nil, fmt.Errorf("paper: FeeBps must be >= 0")
 	}
@@ -124,16 +145,183 @@ func New(cfg Config) (*Trader, error) {
 	if mp == nil {
 		mp = DefaultMarkPriceFunc
 	}
+
+	// Persistence is opt-in but all-or-nothing — both fields must agree.
+	persistEnabled := cfg.Store != nil && cfg.ExchangeID != ""
+	if (cfg.Store != nil) != (cfg.ExchangeID != "") {
+		return nil, fmt.Errorf("paper: Store and ExchangeID must be set together or both omitted")
+	}
+
 	t := &Trader{
 		feeBps:        cfg.FeeBps,
 		getMarkPrice:  mp,
 		leverageBySym: make(map[string]int),
-		balance:       cfg.InitialBalance,
+		store:         cfg.Store,
+		exchangeID:    cfg.ExchangeID,
 		positions:     make(map[string]*Position),
 		orders:        make(map[string]*pendingOrder),
 	}
-	logger.Infof("📄 [paper] initialized: balance=%.2f USDT, fee=%.2fbps", cfg.InitialBalance, cfg.FeeBps)
+
+	if persistEnabled {
+		hydrated, err := t.tryHydrate()
+		if err != nil {
+			// Hydration shouldn't be fatal — log loudly and start fresh so a
+			// corrupted blob doesn't lock the whole exchange out.
+			logger.Warnf("📄 [paper] hydrate failed for %s, starting fresh: %v", cfg.ExchangeID, err)
+		}
+		if !hydrated {
+			if cfg.InitialBalance <= 0 {
+				return nil, fmt.Errorf("paper: InitialBalance must be > 0 (no persisted state for exchange %s)", cfg.ExchangeID)
+			}
+			t.balance = cfg.InitialBalance
+			if err := t.persistLocked(); err != nil {
+				logger.Warnf("📄 [paper] initial persist failed: %v", err)
+			}
+			logger.Infof("📄 [paper] initialized fresh: exchange=%s balance=%.2f USDT, fee=%.2fbps",
+				cfg.ExchangeID, cfg.InitialBalance, cfg.FeeBps)
+		} else {
+			logger.Infof("📄 [paper] hydrated from store: exchange=%s balance=%.2f, positions=%d, fee=%.2fbps",
+				cfg.ExchangeID, t.balance, len(t.positions), cfg.FeeBps)
+		}
+		return t, nil
+	}
+
+	// No persistence — pure in-memory mode, balance is required.
+	if cfg.InitialBalance <= 0 {
+		return nil, fmt.Errorf("paper: InitialBalance must be > 0")
+	}
+	t.balance = cfg.InitialBalance
+	logger.Infof("📄 [paper] initialized in-memory: balance=%.2f USDT, fee=%.2fbps",
+		cfg.InitialBalance, cfg.FeeBps)
 	return t, nil
+}
+
+// snapshot is the JSON shape used by persistence. It deliberately mirrors the
+// in-memory state 1:1 so unmarshal can reconstitute without translation.
+type snapshot struct {
+	Positions map[string]*Position    `json:"positions"`
+	Orders    map[string]*pendingOrder `json:"orders"`
+	Closed    []types.ClosedPnLRecord  `json:"closed"`
+}
+
+// pendingOrder is unexported; expose its fields for JSON round-trip via custom
+// marshal so persistence doesn't require renaming or moving the type.
+type pendingOrderJSON struct {
+	ID           string    `json:"id"`
+	Symbol       string    `json:"symbol"`
+	Side         string    `json:"side"`
+	PositionSide string    `json:"position_side"`
+	Kind         orderKind `json:"kind"`
+	Price        float64   `json:"price"`
+	StopPrice    float64   `json:"stop_price"`
+	Quantity     float64   `json:"quantity"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+func (o *pendingOrder) MarshalJSON() ([]byte, error) {
+	return json.Marshal(pendingOrderJSON{
+		ID: o.id, Symbol: o.symbol, Side: o.side, PositionSide: o.positionSide,
+		Kind: o.kind, Price: o.price, StopPrice: o.stopPrice, Quantity: o.quantity, CreatedAt: o.createdAt,
+	})
+}
+
+func (o *pendingOrder) UnmarshalJSON(b []byte) error {
+	var aux pendingOrderJSON
+	if err := json.Unmarshal(b, &aux); err != nil {
+		return err
+	}
+	o.id, o.symbol, o.side, o.positionSide = aux.ID, aux.Symbol, aux.Side, aux.PositionSide
+	o.kind, o.price, o.stopPrice, o.quantity, o.createdAt = aux.Kind, aux.Price, aux.StopPrice, aux.Quantity, aux.CreatedAt
+	return nil
+}
+
+// tryHydrate loads state from the store. Returns true if a row was found and
+// successfully applied; false if no row exists (caller should init fresh).
+func (t *Trader) tryHydrate() (bool, error) {
+	row, err := t.store.PaperState().Get(t.exchangeID)
+	if err != nil {
+		return false, err
+	}
+	if row == nil {
+		return false, nil
+	}
+
+	var snap snapshot
+	// Empty blobs are fine — treat them as empty maps/slices.
+	if row.PositionsJSON != "" {
+		if err := json.Unmarshal([]byte(row.PositionsJSON), &snap.Positions); err != nil {
+			return false, fmt.Errorf("decode positions: %w", err)
+		}
+	}
+	if row.OrdersJSON != "" {
+		if err := json.Unmarshal([]byte(row.OrdersJSON), &snap.Orders); err != nil {
+			return false, fmt.Errorf("decode orders: %w", err)
+		}
+	}
+	if row.ClosedJSON != "" {
+		if err := json.Unmarshal([]byte(row.ClosedJSON), &snap.Closed); err != nil {
+			return false, fmt.Errorf("decode closed: %w", err)
+		}
+	}
+
+	if snap.Positions != nil {
+		t.positions = snap.Positions
+	}
+	if snap.Orders != nil {
+		t.orders = snap.Orders
+	}
+	t.closed = snap.Closed
+	t.balance = row.Balance
+	t.isCrossMargin = row.IsCrossMargin
+	atomic.StoreUint64(&t.orderSeq, row.OrderSeq)
+	return true, nil
+}
+
+// persistLocked writes the current state to the store. Caller MUST hold t.mu
+// (write). Failures are returned but callers typically log and continue —
+// losing one snapshot is recoverable next tick.
+func (t *Trader) persistLocked() error {
+	if t.store == nil || t.exchangeID == "" {
+		return nil // persistence disabled
+	}
+
+	// Cap closed history before serialization so the blob doesn't grow forever.
+	if len(t.closed) > closedRecordCap {
+		t.closed = t.closed[len(t.closed)-closedRecordCap:]
+	}
+
+	posJSON, err := json.Marshal(t.positions)
+	if err != nil {
+		return fmt.Errorf("marshal positions: %w", err)
+	}
+	ordJSON, err := json.Marshal(t.orders)
+	if err != nil {
+		return fmt.Errorf("marshal orders: %w", err)
+	}
+	clsJSON, err := json.Marshal(t.closed)
+	if err != nil {
+		return fmt.Errorf("marshal closed: %w", err)
+	}
+
+	row := &store.PaperState{
+		ExchangeID:    t.exchangeID,
+		Balance:       t.balance,
+		IsCrossMargin: t.isCrossMargin,
+		OrderSeq:      atomic.LoadUint64(&t.orderSeq),
+		PositionsJSON: string(posJSON),
+		OrdersJSON:    string(ordJSON),
+		ClosedJSON:    string(clsJSON),
+	}
+	return t.store.PaperState().Save(row)
+}
+
+// persistOrLog is a convenience that swallows persist errors via the logger.
+// Used inside mutation paths where we don't want a transient DB error to break
+// the in-memory operation; the caller has already mutated state.
+func (t *Trader) persistOrLog(op string) {
+	if err := t.persistLocked(); err != nil {
+		logger.Warnf("📄 [paper] persist after %s failed: %v", op, err)
+	}
 }
 
 // nextOrderID returns a monotonically increasing unique paper order id.
@@ -278,6 +466,8 @@ func (t *Trader) openPosition(symbol, side string, quantity float64, leverage in
 	logger.Infof("📄 [paper] OPEN %s %s qty=%.6f @ %.4f lev=%dx fee=%.4f balance=%.2f",
 		strings.ToUpper(side), symbol, quantity, price, leverage, fee, t.balance)
 
+	t.persistOrLog("open")
+
 	return map[string]interface{}{
 		"orderId":     id,
 		"symbol":      symbol,
@@ -352,6 +542,8 @@ func (t *Trader) closePosition(symbol, expectedSide string, quantity float64) (m
 	logger.Infof("📄 [paper] CLOSE %s %s qty=%.6f @ %.4f realized=%.4f fee=%.4f balance=%.2f",
 		strings.ToUpper(pos.Side), symbol, closeQty, price, realized, fee, t.balance)
 
+	t.persistOrLog("close")
+
 	return map[string]interface{}{
 		"orderId":     rec.OrderID,
 		"symbol":      symbol,
@@ -364,6 +556,8 @@ func (t *Trader) closePosition(symbol, expectedSide string, quantity float64) (m
 }
 
 // SetLeverage records the leverage for a symbol; paper has no real-side state.
+// Symbol-level leverage isn't persisted (it's overwritten by every Open call's
+// leverage param anyway).
 func (t *Trader) SetLeverage(symbol string, leverage int) error {
 	if leverage <= 0 {
 		return fmt.Errorf("paper: leverage must be > 0")
@@ -379,8 +573,9 @@ func (t *Trader) SetLeverage(symbol string, leverage int) error {
 // the liquidation buffer using account-wide equity.
 func (t *Trader) SetMarginMode(symbol string, isCrossMargin bool) error {
 	t.mu.Lock()
+	defer t.mu.Unlock()
 	t.isCrossMargin = isCrossMargin
-	t.mu.Unlock()
+	t.persistOrLog("set_margin_mode")
 	return nil
 }
 
@@ -410,6 +605,7 @@ func (t *Trader) SetStopLoss(symbol, positionSide string, quantity, stopPrice fl
 		quantity:     quantity,
 		createdAt:    time.Now().UTC(),
 	}
+	t.persistOrLog("set_stop_loss")
 	return nil
 }
 
@@ -433,6 +629,7 @@ func (t *Trader) SetTakeProfit(symbol, positionSide string, quantity, takeProfit
 		quantity:     quantity,
 		createdAt:    time.Now().UTC(),
 	}
+	t.persistOrLog("set_take_profit")
 	return nil
 }
 
@@ -455,6 +652,7 @@ func (t *Trader) CancelStopOrders(symbol string) error {
 			delete(t.orders, id)
 		}
 	}
+	t.persistOrLog("cancel_stop_orders")
 	return nil
 }
 
@@ -467,6 +665,7 @@ func (t *Trader) CancelAllOrders(symbol string) error {
 			delete(t.orders, id)
 		}
 	}
+	t.persistOrLog("cancel_all_orders")
 	return nil
 }
 
@@ -478,6 +677,7 @@ func (t *Trader) cancelByKind(symbol string, kind orderKind) error {
 			delete(t.orders, id)
 		}
 	}
+	t.persistOrLog("cancel_by_kind")
 	return nil
 }
 
@@ -657,7 +857,11 @@ func (t *Trader) totalMarginLockedLocked() float64 {
 // crossed its liquidation level. The full initial margin is written off (no
 // "remainder returned to wallet" — V1 simplification consistent with isolated
 // liquidation losing the entire margin). Caller MUST hold t.mu (write).
+//
+// State changes here flush to the store at the end so a liquidation event
+// survives a crash.
 func (t *Trader) settleLiquidationsLocked() {
+	liquidated := false
 	for sym, p := range t.positions {
 		mark, err := t.getMarkPrice(sym)
 		if err != nil {
@@ -698,6 +902,10 @@ func (t *Trader) settleLiquidationsLocked() {
 
 		logger.Infof("📄 [paper] LIQUIDATED %s %s qty=%.6f mark=%.4f liq=%.4f loss=%.4f balance=%.2f",
 			strings.ToUpper(p.Side), sym, p.Quantity, mark, liq, margin, t.balance)
+		liquidated = true
+	}
+	if liquidated {
+		t.persistOrLog("liquidation")
 	}
 }
 

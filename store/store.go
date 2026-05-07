@@ -30,6 +30,7 @@ type Store struct {
 	grid           *GridStore
 	aiCharge       *AIChargeStore
 	telegramConfig TelegramConfigStore
+	paperState     *PaperStateStore
 
 	mu sync.RWMutex
 }
@@ -163,6 +164,9 @@ func (s *Store) initTables() error {
 	}
 	if err := s.AICharge().initTables(); err != nil {
 		return fmt.Errorf("failed to initialize AI charge tables: %w", err)
+	}
+	if err := s.PaperState().initTables(); err != nil {
+		return fmt.Errorf("failed to initialize paper state tables: %w", err)
 	}
 	return nil
 }
@@ -305,6 +309,16 @@ func (s *Store) TelegramConfig() TelegramConfigStore {
 		s.telegramConfig = NewTelegramConfigStore(s.gdb)
 	}
 	return s.telegramConfig
+}
+
+// PaperState gets paper-trader state storage (single-row JSON-blob per exchange).
+func (s *Store) PaperState() *PaperStateStore {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.paperState == nil {
+		s.paperState = NewPaperStateStore(s.gdb)
+	}
+	return s.paperState
 }
 
 // Close closes database connection

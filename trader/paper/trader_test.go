@@ -4,6 +4,11 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"nofx/store"
+
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 )
 
 // fixedMarkPrice gives the test deterministic prices; tests can flip it mid-run.
@@ -314,6 +319,146 @@ func TestSetMarginMode_StoresFlag(t *testing.T) {
 	}
 	if !tr.isCrossMargin {
 		t.Fatalf("isCrossMargin not stored")
+	}
+}
+
+// ─── Persistence ───────────────────────────────────────────────────────────
+
+// newPaperStore constructs an isolated in-memory SQLite-backed store for tests.
+func newPaperStore(t *testing.T) *store.Store {
+	t.Helper()
+	gdb, err := gorm.Open(sqlite.Open("file::memory:?cache=shared&_pragma=foreign_keys(1)"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open in-memory sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&store.PaperState{}); err != nil {
+		t.Fatalf("migrate paper_states: %v", err)
+	}
+	st, err := store.NewFromGorm(gdb)
+	if err != nil {
+		t.Fatalf("NewFromGorm: %v", err)
+	}
+	return st
+}
+
+func TestPersistence_RoundTripsAcrossReinit(t *testing.T) {
+	st := newPaperStore(t)
+	mp := &fixedMarkPrice{price: map[string]float64{"BTCUSDT": 100}}
+
+	tr1, err := New(Config{
+		InitialBalance: 10_000, FeeBps: 0,
+		MarkPriceFunc: mp.get,
+		Store:         st, ExchangeID: "test-exchange-1",
+	})
+	if err != nil {
+		t.Fatalf("New#1: %v", err)
+	}
+
+	if _, err := tr1.OpenLong("BTCUSDT", 1, 5); err != nil {
+		t.Fatalf("OpenLong: %v", err)
+	}
+	if err := tr1.SetStopLoss("BTCUSDT", "LONG", 1, 90); err != nil {
+		t.Fatalf("SetStopLoss: %v", err)
+	}
+	mp.set("BTCUSDT", 110)
+	if _, err := tr1.CloseLong("BTCUSDT", 0.5); err != nil { // partial close
+		t.Fatalf("CloseLong: %v", err)
+	}
+
+	bal1Map, _ := tr1.GetBalance()
+	bal1, _ := bal1Map["totalWalletBalance"].(float64)
+	pos1, _ := tr1.GetPositions()
+	closed1, _ := tr1.GetClosedPnL(time.Time{}, 100)
+
+	// Drop tr1 entirely and rebuild from the same exchange id.
+	tr2, err := New(Config{
+		InitialBalance: 999_999, // ignored when state hydrates
+		FeeBps:         0,
+		MarkPriceFunc:  mp.get,
+		Store:          st, ExchangeID: "test-exchange-1",
+	})
+	if err != nil {
+		t.Fatalf("New#2 (hydrate): %v", err)
+	}
+
+	bal2Map, _ := tr2.GetBalance()
+	bal2, _ := bal2Map["totalWalletBalance"].(float64)
+	if bal1 != bal2 {
+		t.Fatalf("balance not restored: pre=%.4f post=%.4f", bal1, bal2)
+	}
+
+	pos2, _ := tr2.GetPositions()
+	if len(pos1) != len(pos2) {
+		t.Fatalf("positions count mismatch: pre=%d post=%d", len(pos1), len(pos2))
+	}
+	if len(pos2) == 1 {
+		entry, _ := pos2[0]["entryPrice"].(float64)
+		if entry != 100 {
+			t.Fatalf("entry price not restored: %v", entry)
+		}
+	}
+
+	closed2, _ := tr2.GetClosedPnL(time.Time{}, 100)
+	if len(closed1) != len(closed2) {
+		t.Fatalf("closed records count mismatch: pre=%d post=%d", len(closed1), len(closed2))
+	}
+}
+
+func TestPersistence_FreshExchangeRequiresInitialBalance(t *testing.T) {
+	st := newPaperStore(t)
+	if _, err := New(Config{
+		InitialBalance: 0, // missing
+		Store:          st, ExchangeID: "fresh-no-balance",
+	}); err == nil {
+		t.Fatalf("expected error when no persisted state and no InitialBalance")
+	}
+}
+
+func TestPersistence_StoreAndExchangeIDMustAgree(t *testing.T) {
+	st := newPaperStore(t)
+	if _, err := New(Config{InitialBalance: 1000, Store: st}); err == nil {
+		t.Fatalf("expected error when Store set without ExchangeID")
+	}
+	if _, err := New(Config{InitialBalance: 1000, ExchangeID: "x"}); err == nil {
+		t.Fatalf("expected error when ExchangeID set without Store")
+	}
+}
+
+func TestPersistence_LiquidationSurvivesRestart(t *testing.T) {
+	st := newPaperStore(t)
+	mp := &fixedMarkPrice{price: map[string]float64{"BTCUSDT": 100}}
+
+	tr1, _ := New(Config{
+		InitialBalance: 1_000, FeeBps: 0,
+		MarkPriceFunc: mp.get,
+		Store:         st, ExchangeID: "liq-test",
+	})
+	if _, err := tr1.OpenLong("BTCUSDT", 1, 5); err != nil {
+		t.Fatalf("OpenLong: %v", err)
+	}
+	mp.set("BTCUSDT", 80) // triggers liquidation when next read happens
+	_, _ = tr1.GetPositions()  // forces settlement + persist
+
+	// Reincarnate from store. Even though mark is now 80 (still below liq),
+	// the position has already been liquidated and recorded as a closed entry.
+	tr2, _ := New(Config{
+		InitialBalance: 999_999, // ignored — hydrated
+		FeeBps:         0,
+		MarkPriceFunc:  mp.get,
+		Store:          st, ExchangeID: "liq-test",
+	})
+
+	bal, _ := tr2.GetBalance()
+	if got, _ := bal["totalWalletBalance"].(float64); got != 980 {
+		t.Fatalf("balance after liquidation+restart got=%.4f want=980", got)
+	}
+	pos, _ := tr2.GetPositions()
+	if len(pos) != 0 {
+		t.Fatalf("expected zero positions after liquidation+restart, got %d", len(pos))
+	}
+	closed, _ := tr2.GetClosedPnL(time.Time{}, 10)
+	if len(closed) != 1 || closed[0].CloseType != "liquidation" {
+		t.Fatalf("liquidation record not restored: %+v", closed)
 	}
 }
 
