@@ -307,16 +307,23 @@ func GetDefaultStrategyConfig(lang string) StrategyConfig {
 		normalizedLang = "zh"
 	}
 
+	// Default to a static BTC+ETH+SOL coin source so freshly-installed users
+	// (and paper-trading runs that don't have access to upstream rankings) can
+	// trade out-of-the-box without depending on the public AI500 API key, which
+	// the upstream provider has deprecated for the shipped value. Users who
+	// want broader scanning can flip CoinSource.UseAI500=true once they have
+	// their own NofxOSAPIKey configured.
 	config := StrategyConfig{
 		Language: normalizedLang,
 		CoinSource: CoinSourceConfig{
-			SourceType: "ai500",
-			UseAI500:   true,
-			AI500Limit: 3,
-			UseOITop:   false,
-			OITopLimit: 3,
-			UseOILow:   false,
-			OILowLimit: 3,
+			SourceType:  "static",
+			StaticCoins: []string{"BTCUSDT", "ETHUSDT", "SOLUSDT"},
+			UseAI500:    false,
+			AI500Limit:  3,
+			UseOITop:    false,
+			OITopLimit:  3,
+			UseOILow:    false,
+			OILowLimit:  3,
 		},
 		Indicators: IndicatorConfig{
 			Klines: KlineConfig{
@@ -340,24 +347,28 @@ func GetDefaultStrategyConfig(lang string) StrategyConfig {
 			RSIPeriods:        []int{7, 14},
 			ATRPeriods:        []int{14},
 			BOLLPeriods:       []int{20},
-			// NofxOS unified API key
-			NofxOSAPIKey: "cm_568c67eae410d912c54c",
-			// Quant data
-			EnableQuantData:    true,
-			EnableQuantOI:      true,
-			EnableQuantNetflow: true,
-			// OI ranking data
-			EnableOIRanking:   true,
-			OIRankingDuration: "1h",
-			OIRankingLimit:    10,
-			// NetFlow ranking data
-			EnableNetFlowRanking:   true,
+			// NofxOS unified API key — empty by default. The previous public
+			// shared key (cm_568c67eae410d912c54c) was deprecated upstream;
+			// shipping it here meant fresh installs got a flood of
+			// "API key has been deprecated" errors on every cycle. Users who
+			// want NofxOS-backed candidate-coin scanning, OI rankings, and
+			// fund-flow rankings should provision their own key and paste it
+			// in via Strategy Studio.
+			NofxOSAPIKey: "",
+			// Quant data — gated on a working NofxOSAPIKey, so default off.
+			EnableQuantData:    false,
+			EnableQuantOI:      false,
+			EnableQuantNetflow: false,
+			// Ranking data — same NofxOS dependency, default off.
+			EnableOIRanking:        false,
+			OIRankingDuration:      "1h",
+			OIRankingLimit:         10,
+			EnableNetFlowRanking:   false,
 			NetFlowRankingDuration: "1h",
 			NetFlowRankingLimit:    10,
-			// Price ranking data
-			EnablePriceRanking:   true,
-			PriceRankingDuration: "1h,4h,24h",
-			PriceRankingLimit:    10,
+			EnablePriceRanking:     false,
+			PriceRankingDuration:   "1h,4h,24h",
+			PriceRankingLimit:      10,
 		},
 		RiskControl: RiskControlConfig{
 			MaxPositions:                 3,   // Max 3 coins simultaneously (CODE ENFORCED)

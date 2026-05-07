@@ -103,6 +103,10 @@ func (s *Server) getKlinesFromCoinank(symbol, interval, exchange string, limit i
 	case "kucoin":
 		// KuCoin doesn't have direct CoinAnk support, use Binance data as fallback
 		coinankExchange = coinank_enum.Binance
+	case "paper":
+		// Paper trading is virtual — there is no per-venue order book to source
+		// klines from. Binance is the canonical reference price for paper.
+		coinankExchange = coinank_enum.Binance
 	default:
 		// For any unknown exchange, default to Binance
 		logger.Warnf("⚠️ Unknown exchange '%s', defaulting to Binance for CoinAnk", exchange)
