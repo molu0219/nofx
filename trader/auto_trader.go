@@ -160,6 +160,11 @@ type AutoTraderConfig struct {
 
 	// Strategy configuration (use complete strategy config)
 	StrategyConfig *store.StrategyConfig // Strategy configuration (includes coin sources, indicators, risk control, prompts, etc.)
+
+	// StrategyID is the DB row id for the live config; the auto-optimizer
+	// uses it to look up + persist updated settings between cycles. Empty
+	// disables optimization regardless of StrategyConfig.AutoOptimize.
+	StrategyID string
 }
 
 // AutoTrader automatic trader
@@ -198,9 +203,11 @@ type AutoTrader struct {
 	consecutiveAIFailures int                // Consecutive AI call failures
 	safeMode              bool               // Safe mode: no new positions, protect existing ones
 	safeModeReason        string             // Why safe mode was activated
-	autoPaused            bool               // True when the trader auto-paused itself
-	pauseReason           string             // Human-readable reason — surfaced via /api/status
-	notifier              Notifier           // Optional out-of-band notify channel; nil → no-op
+	autoPaused            bool                       // True when the trader auto-paused itself
+	pauseReason           string                     // Human-readable reason — surfaced via /api/status
+	notifier              Notifier                   // Optional out-of-band notify channel; nil → no-op
+	optimizer             *kernel.StrategyOptimizer  // Optional meta-AI strategy refinement; nil → disabled
+	strategyID            string                     // Strategy DB id used by optimizer
 }
 
 // NewAutoTrader creates an automatic trader
@@ -427,7 +434,7 @@ func NewAutoTrader(config AutoTraderConfig, st *store.Store, userID string) (*Au
 	strategyEngine := kernel.NewStrategyEngine(config.StrategyConfig, claw402Key)
 	logger.Infof("✓ [%s] Using strategy engine (strategy configuration loaded)", config.Name)
 
-	return &AutoTrader{
+	at := &AutoTrader{
 		id:                    config.ID,
 		name:                  config.Name,
 		aiModel:               config.AIModel,
@@ -452,7 +459,35 @@ func NewAutoTrader(config AutoTraderConfig, st *store.Store, userID string) (*Au
 		peakPnLCacheMutex:     sync.RWMutex{},
 		lastBalanceSyncTime:   time.Now(),
 		userID:                userID,
-	}, nil
+		strategyID:            config.StrategyID,
+	}
+
+	// Wire the meta-AI optimizer when the strategy opts in. Off by default;
+	// users flip it via Strategy Studio (StrategyConfig.AutoOptimize.Enabled).
+	if config.StrategyConfig != nil && config.StrategyConfig.AutoOptimize.Enabled && config.StrategyID != "" && st != nil {
+		every := config.StrategyConfig.AutoOptimize.EveryNCycles
+		if every <= 0 {
+			every = 10
+		}
+		minIntervalMin := config.StrategyConfig.AutoOptimize.MinIntervalMinutes
+		if minIntervalMin <= 0 {
+			minIntervalMin = 30
+		}
+		at.optimizer = &kernel.StrategyOptimizer{
+			Store:        st,
+			AIClient:     mcpClient,
+			UserID:       userID,
+			StrategyID:   config.StrategyID,
+			TraderID:     config.ID,
+			EveryNCycles: every,
+			MinInterval:  time.Duration(minIntervalMin) * time.Minute,
+			MaxLookback:  20,
+		}
+		logger.Infof("🧠 [%s] Auto-optimize enabled (every %d cycles, min interval %dmin)",
+			config.Name, every, minIntervalMin)
+	}
+
+	return at, nil
 }
 
 // Run runs the automatic trading main loop

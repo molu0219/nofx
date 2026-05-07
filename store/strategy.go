@@ -104,6 +104,10 @@ type StrategyConfig struct {
 	// editable sections of System Prompt
 	PromptSections PromptSectionsConfig `json:"prompt_sections,omitempty"`
 
+	// Auto-optimize: meta-AI loop that reviews recent trades + this config
+	// and proposes bounded mutations. See kernel/strategy_optimizer.go.
+	AutoOptimize AutoOptimizeConfig `json:"auto_optimize,omitempty"`
+
 	// Grid trading configuration (only used when StrategyType == "grid_trading")
 	GridConfig *GridStrategyConfig `json:"grid_config,omitempty"`
 }
@@ -152,6 +156,20 @@ type PromptSectionsConfig struct {
 	EntryStandards string `json:"entry_standards,omitempty"`
 	// decision process
 	DecisionProcess string `json:"decision_process,omitempty"`
+}
+
+// AutoOptimizeConfig controls the meta-AI strategy optimizer that reviews
+// recent performance and proposes bounded config tweaks. Off by default —
+// users opt in via Strategy Studio when they're comfortable letting the AI
+// refine its own behaviour.
+type AutoOptimizeConfig struct {
+	// Enabled toggles the optimizer per-strategy.
+	Enabled bool `json:"enabled"`
+	// EveryNCycles spaces reviews; 0 → use default 10.
+	EveryNCycles int `json:"every_n_cycles,omitempty"`
+	// MinIntervalMinutes is the wall-clock floor between reviews
+	// regardless of cycle count; 0 → use default 30 minutes.
+	MinIntervalMinutes int `json:"min_interval_minutes,omitempty"`
 }
 
 // CoinSourceConfig coin source configuration

@@ -173,6 +173,15 @@ func (at *AutoTrader) runCycle() error {
 		return fmt.Errorf("failed to get AI decision: %w", err)
 	}
 
+	// Run the meta-AI strategy optimizer if the user opted in. Fires at most
+	// every N cycles (default 10) AND no more often than MinInterval. Errors
+	// are logged but never abort the cycle — optimization is opportunistic.
+	if at.optimizer != nil {
+		if err := at.optimizer.MaybeReview(at.callCount); err != nil {
+			at.logWarnf("🧠 strategy optimizer: %v", err)
+		}
+	}
+
 	// AI succeeded — reset failure counter and deactivate safe mode
 	if at.consecutiveAIFailures > 0 {
 		at.logInfof("✅ AI recovered after %d consecutive failures", at.consecutiveAIFailures)
