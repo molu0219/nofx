@@ -19,6 +19,7 @@ import (
 	"nofx/trader/kucoin"
 	"nofx/trader/lighter"
 	"nofx/trader/okx"
+	"nofx/trader/paper"
 	"nofx/wallet"
 	"sync"
 	"time"
@@ -57,8 +58,12 @@ type AutoTraderConfig struct {
 	AIModel string // AI model: "qwen" or "deepseek"
 
 	// Trading platform selection
-	Exchange   string // Exchange type: "binance", "bybit", "okx", "bitget", "gate", "hyperliquid", "aster" or "lighter"
+	Exchange   string // Exchange type: "binance", "bybit", "okx", "bitget", "gate", "hyperliquid", "aster", "lighter", or "paper"
 	ExchangeID string // Exchange account UUID (for multi-account support)
+
+	// Paper trader configuration (used when Exchange == "paper")
+	PaperFeeBps  float64 // Taker fee in basis points (default 5 if zero)
+	PaperBalance float64 // Starting USDT balance for paper account (defaults to InitialBalance)
 
 	// Binance API configuration
 	BinanceAPIKey    string
@@ -312,6 +317,23 @@ func NewAutoTrader(config AutoTraderConfig, st *store.Store, userID string) (*Au
 	case "indodax":
 		logger.Infof("🏦 [%s] Using Indodax Spot trading", config.Name)
 		trader = indodax.NewIndodaxTrader(config.IndodaxAPIKey, config.IndodaxSecretKey)
+	case "paper":
+		logger.Infof("📄 [%s] Using paper (virtual) exchange", config.Name)
+		paperBalance := config.PaperBalance
+		if paperBalance <= 0 {
+			paperBalance = config.InitialBalance
+		}
+		if paperBalance <= 0 {
+			paperBalance = 10000 // sensible default starting equity for a paper run
+		}
+		fee := config.PaperFeeBps
+		if fee == 0 {
+			fee = 5 // 0.05% taker, generic CEX baseline
+		}
+		trader, err = paper.New(paper.Config{InitialBalance: paperBalance, FeeBps: fee})
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize paper trader: %w", err)
+		}
 	default:
 		return nil, fmt.Errorf("unsupported trading platform: %s", config.Exchange)
 	}

@@ -1,0 +1,596 @@
+// Package paper provides a virtual exchange that implements the trader.Trader
+// interface using in-memory positions and live mark prices fetched from the
+// market data layer. It lets the rest of NOFX (auto loop, AI decisions, risk
+// layer, store, dashboard) run end-to-end without ever touching a real venue.
+//
+// Scope (V1):
+//   - Per-symbol single position (no hedge mode). One long OR one short per symbol.
+//   - Market-only fills at the latest mark price returned by market.Get.
+//   - Stop-loss / take-profit are stored as conditional orders but not auto-triggered;
+//     the framework risk layer (auto_trader_risk.go) is responsible for calling
+//     CloseLong / CloseShort when its own monitor fires.
+//   - State is in-memory; restarting the process resets the paper account.
+//   - Optional taker fee in basis points (default 5 bps = 0.05%).
+//
+// What it does not do (V1):
+//   - No partial fills, no slippage modelling beyond a flat fee.
+//   - No funding-rate accrual.
+//   - No cross-margin auto-deleveraging or liquidation engine.
+//   - No persistence; positions and balance reset on restart.
+package paper
+
+import (
+	"fmt"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"nofx/logger"
+	"nofx/market"
+	"nofx/trader/types"
+)
+
+// MarkPriceFunc returns the current mark price for a symbol. It is parameterised
+// so tests can inject deterministic prices instead of hitting the real market.
+type MarkPriceFunc func(symbol string) (float64, error)
+
+// DefaultMarkPriceFunc resolves the price via the production market data layer.
+func DefaultMarkPriceFunc(symbol string) (float64, error) {
+	d, err := market.Get(symbol)
+	if err != nil {
+		return 0, fmt.Errorf("paper: market.Get(%s): %w", symbol, err)
+	}
+	if d == nil || d.CurrentPrice <= 0 {
+		return 0, fmt.Errorf("paper: market.Get(%s) returned no price", symbol)
+	}
+	return d.CurrentPrice, nil
+}
+
+// Position represents an open virtual position.
+type Position struct {
+	Symbol     string
+	Side       string // "long" or "short"
+	Quantity   float64
+	EntryPrice float64
+	Leverage   int
+	OpenedAt   time.Time
+}
+
+// orderKind enumerates the conditional order types we track.
+type orderKind string
+
+const (
+	orderStopLoss   orderKind = "STOP_MARKET"
+	orderTakeProfit orderKind = "TAKE_PROFIT_MARKET"
+	orderLimit      orderKind = "LIMIT"
+)
+
+type pendingOrder struct {
+	id           string
+	symbol       string
+	side         string // "BUY" / "SELL"
+	positionSide string // "LONG" / "SHORT"
+	kind         orderKind
+	price        float64 // limit price
+	stopPrice    float64 // trigger price for stop / take-profit
+	quantity     float64
+	createdAt    time.Time
+}
+
+// Trader is the in-memory virtual exchange.
+type Trader struct {
+	mu sync.RWMutex
+
+	// Settings — set once at construction; read-only afterwards.
+	feeBps        float64       // taker fee in basis points; e.g. 5 = 0.05%
+	getMarkPrice  MarkPriceFunc // injectable for tests
+	leverageBySym map[string]int
+
+	// Mutable state.
+	balance   float64               // available wallet balance (USDT)
+	positions map[string]*Position  // by symbol
+	orders    map[string]*pendingOrder
+	closed    []types.ClosedPnLRecord
+	orderSeq  uint64
+}
+
+// Config is the paper trader configuration.
+type Config struct {
+	InitialBalance float64       // starting USDT balance; required (>0)
+	FeeBps         float64       // optional taker fee bps (default 5)
+	MarkPriceFunc  MarkPriceFunc // optional override (defaults to live market data)
+}
+
+// New constructs a paper Trader.
+//
+// FeeBps is honoured exactly: zero means zero fees. Negative values are rejected.
+// Callers wiring the paper trader into auto_trader.go should pass an explicit
+// fee (5 bps is a reasonable default for a generic CEX).
+func New(cfg Config) (*Trader, error) {
+	if cfg.InitialBalance <= 0 {
+		return nil, fmt.Errorf("paper: InitialBalance must be > 0")
+	}
+	if cfg.FeeBps < 0 {
+		return nil, fmt.Errorf("paper: FeeBps must be >= 0")
+	}
+	mp := cfg.MarkPriceFunc
+	if mp == nil {
+		mp = DefaultMarkPriceFunc
+	}
+	t := &Trader{
+		feeBps:        cfg.FeeBps,
+		getMarkPrice:  mp,
+		leverageBySym: make(map[string]int),
+		balance:       cfg.InitialBalance,
+		positions:     make(map[string]*Position),
+		orders:        make(map[string]*pendingOrder),
+	}
+	logger.Infof("📄 [paper] initialized: balance=%.2f USDT, fee=%.2fbps", cfg.InitialBalance, cfg.FeeBps)
+	return t, nil
+}
+
+// nextOrderID returns a monotonically increasing unique paper order id.
+func (t *Trader) nextOrderID(prefix string) string {
+	n := atomic.AddUint64(&t.orderSeq, 1)
+	return fmt.Sprintf("%s-%d-%d", prefix, time.Now().UnixNano(), n)
+}
+
+// ---------------------------------------------------------------------------
+// types.Trader implementation
+// ---------------------------------------------------------------------------
+
+// GetBalance returns the wallet balance and aggregate equity in the same shape
+// callers expect (matches the multi-key fallback in auto_trader.go).
+func (t *Trader) GetBalance() (map[string]interface{}, error) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	unrealized := 0.0
+	margin := 0.0
+	for _, p := range t.positions {
+		px, err := t.getMarkPrice(p.Symbol)
+		if err != nil {
+			// Don't fail the entire balance call on a single missing tick;
+			// just skip that position's unrealized component.
+			continue
+		}
+		unrealized += unrealizedPnL(p, px)
+		margin += positionMargin(p)
+	}
+	equity := t.balance + unrealized
+	out := map[string]interface{}{
+		"totalWalletBalance": t.balance,
+		"total_equity":       equity,
+		"availableBalance":   t.balance - margin,
+		"unrealizedPnL":      unrealized,
+		"marginUsed":         margin,
+	}
+	return out, nil
+}
+
+// GetPositions returns all open positions in the Binance-shaped map slice.
+func (t *Trader) GetPositions() ([]map[string]interface{}, error) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	out := make([]map[string]interface{}, 0, len(t.positions))
+	for _, p := range t.positions {
+		mark, err := t.getMarkPrice(p.Symbol)
+		if err != nil {
+			mark = p.EntryPrice
+		}
+		amt := p.Quantity
+		if p.Side == "short" {
+			amt = -p.Quantity
+		}
+		entry := p.EntryPrice
+		out = append(out, map[string]interface{}{
+			"symbol":           p.Symbol,
+			"positionAmt":      amt,
+			"entryPrice":       entry,
+			"markPrice":        mark,
+			"unRealizedProfit": unrealizedPnL(p, mark),
+			"leverage":         float64(p.Leverage),
+			"liquidationPrice": estimatedLiquidationPrice(p),
+			"side":             p.Side,
+		})
+	}
+	return out, nil
+}
+
+// OpenLong fills a market buy at the live mark price.
+func (t *Trader) OpenLong(symbol string, quantity float64, leverage int) (map[string]interface{}, error) {
+	return t.openPosition(symbol, "long", quantity, leverage)
+}
+
+// OpenShort fills a market sell at the live mark price.
+func (t *Trader) OpenShort(symbol string, quantity float64, leverage int) (map[string]interface{}, error) {
+	return t.openPosition(symbol, "short", quantity, leverage)
+}
+
+func (t *Trader) openPosition(symbol, side string, quantity float64, leverage int) (map[string]interface{}, error) {
+	if quantity <= 0 {
+		return nil, fmt.Errorf("paper: open quantity must be > 0")
+	}
+	if leverage <= 0 {
+		leverage = 1
+	}
+	price, err := t.getMarkPrice(symbol)
+	if err != nil {
+		return nil, err
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if existing, ok := t.positions[symbol]; ok {
+		if existing.Side != side {
+			return nil, fmt.Errorf("paper: cannot open %s on %s while a %s position is open (V1 = no hedge mode)", side, symbol, existing.Side)
+		}
+		// Same-side scale-in: weighted-average entry, sum quantity.
+		newQty := existing.Quantity + quantity
+		existing.EntryPrice = ((existing.EntryPrice * existing.Quantity) + (price * quantity)) / newQty
+		existing.Quantity = newQty
+		existing.Leverage = leverage
+	} else {
+		t.positions[symbol] = &Position{
+			Symbol:     symbol,
+			Side:       side,
+			Quantity:   quantity,
+			EntryPrice: price,
+			Leverage:   leverage,
+			OpenedAt:   time.Now().UTC(),
+		}
+	}
+
+	// Charge taker fee against balance.
+	notional := quantity * price
+	fee := notional * (t.feeBps / 10000.0)
+	t.balance -= fee
+
+	id := t.nextOrderID("OPEN")
+	logger.Infof("📄 [paper] OPEN %s %s qty=%.6f @ %.4f lev=%dx fee=%.4f balance=%.2f",
+		strings.ToUpper(side), symbol, quantity, price, leverage, fee, t.balance)
+
+	return map[string]interface{}{
+		"orderId":     id,
+		"symbol":      symbol,
+		"status":      "FILLED",
+		"avgPrice":    price,
+		"executedQty": quantity,
+		"commission":  fee,
+	}, nil
+}
+
+// CloseLong closes a long position partially or fully (quantity == 0 closes all).
+func (t *Trader) CloseLong(symbol string, quantity float64) (map[string]interface{}, error) {
+	return t.closePosition(symbol, "long", quantity)
+}
+
+// CloseShort closes a short position partially or fully.
+func (t *Trader) CloseShort(symbol string, quantity float64) (map[string]interface{}, error) {
+	return t.closePosition(symbol, "short", quantity)
+}
+
+func (t *Trader) closePosition(symbol, expectedSide string, quantity float64) (map[string]interface{}, error) {
+	price, err := t.getMarkPrice(symbol)
+	if err != nil {
+		return nil, err
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	pos, ok := t.positions[symbol]
+	if !ok {
+		return nil, fmt.Errorf("paper: no open position for %s", symbol)
+	}
+	if pos.Side != expectedSide {
+		return nil, fmt.Errorf("paper: position on %s is %s, not %s", symbol, pos.Side, expectedSide)
+	}
+	closeQty := quantity
+	if closeQty <= 0 || closeQty > pos.Quantity {
+		closeQty = pos.Quantity
+	}
+
+	realized := realizedPnL(pos, price, closeQty)
+	notional := closeQty * price
+	fee := notional * (t.feeBps / 10000.0)
+	t.balance += realized - fee
+
+	t.dropAssociatedOrders(symbol)
+
+	rec := types.ClosedPnLRecord{
+		Symbol:      symbol,
+		Side:        pos.Side,
+		EntryPrice:  pos.EntryPrice,
+		ExitPrice:   price,
+		Quantity:    closeQty,
+		RealizedPnL: realized - fee,
+		Fee:         fee,
+		Leverage:    pos.Leverage,
+		EntryTime:   pos.OpenedAt,
+		ExitTime:    time.Now().UTC(),
+		OrderID:     t.nextOrderID("CLOSE"),
+		CloseType:   "manual",
+		ExchangeID:  "paper",
+	}
+	t.closed = append(t.closed, rec)
+
+	if closeQty >= pos.Quantity {
+		delete(t.positions, symbol)
+	} else {
+		pos.Quantity -= closeQty
+	}
+
+	logger.Infof("📄 [paper] CLOSE %s %s qty=%.6f @ %.4f realized=%.4f fee=%.4f balance=%.2f",
+		strings.ToUpper(pos.Side), symbol, closeQty, price, realized, fee, t.balance)
+
+	return map[string]interface{}{
+		"orderId":     rec.OrderID,
+		"symbol":      symbol,
+		"status":      "FILLED",
+		"avgPrice":    price,
+		"executedQty": closeQty,
+		"realizedPnl": realized - fee,
+		"commission":  fee,
+	}, nil
+}
+
+// SetLeverage records the leverage for a symbol; paper has no real-side state.
+func (t *Trader) SetLeverage(symbol string, leverage int) error {
+	if leverage <= 0 {
+		return fmt.Errorf("paper: leverage must be > 0")
+	}
+	t.mu.Lock()
+	t.leverageBySym[symbol] = leverage
+	t.mu.Unlock()
+	return nil
+}
+
+// SetMarginMode is a no-op (paper has no margin mode distinction).
+func (t *Trader) SetMarginMode(symbol string, isCrossMargin bool) error { return nil }
+
+// GetMarketPrice returns the current mark price for a symbol.
+func (t *Trader) GetMarketPrice(symbol string) (float64, error) {
+	return t.getMarkPrice(symbol)
+}
+
+// SetStopLoss stores a stop-loss conditional order. V1 does NOT auto-trigger;
+// the framework risk layer must call CloseLong/CloseShort when fired.
+func (t *Trader) SetStopLoss(symbol, positionSide string, quantity, stopPrice float64) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	side := "SELL"
+	if positionSide == "SHORT" {
+		side = "BUY"
+	}
+	id := t.nextOrderID("SL")
+	t.orders[id] = &pendingOrder{
+		id:           id,
+		symbol:       symbol,
+		side:         side,
+		positionSide: positionSide,
+		kind:         orderStopLoss,
+		stopPrice:    stopPrice,
+		quantity:     quantity,
+		createdAt:    time.Now().UTC(),
+	}
+	return nil
+}
+
+// SetTakeProfit stores a take-profit conditional order. V1 does NOT auto-trigger.
+func (t *Trader) SetTakeProfit(symbol, positionSide string, quantity, takeProfitPrice float64) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	side := "SELL"
+	if positionSide == "SHORT" {
+		side = "BUY"
+	}
+	id := t.nextOrderID("TP")
+	t.orders[id] = &pendingOrder{
+		id:           id,
+		symbol:       symbol,
+		side:         side,
+		positionSide: positionSide,
+		kind:         orderTakeProfit,
+		stopPrice:    takeProfitPrice,
+		quantity:     quantity,
+		createdAt:    time.Now().UTC(),
+	}
+	return nil
+}
+
+// CancelStopLossOrders removes only stop-loss orders for a symbol.
+func (t *Trader) CancelStopLossOrders(symbol string) error {
+	return t.cancelByKind(symbol, orderStopLoss)
+}
+
+// CancelTakeProfitOrders removes only take-profit orders for a symbol.
+func (t *Trader) CancelTakeProfitOrders(symbol string) error {
+	return t.cancelByKind(symbol, orderTakeProfit)
+}
+
+// CancelStopOrders removes both stop-loss AND take-profit orders for a symbol.
+func (t *Trader) CancelStopOrders(symbol string) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for id, o := range t.orders {
+		if o.symbol == symbol && (o.kind == orderStopLoss || o.kind == orderTakeProfit) {
+			delete(t.orders, id)
+		}
+	}
+	return nil
+}
+
+// CancelAllOrders removes every pending order for a symbol.
+func (t *Trader) CancelAllOrders(symbol string) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for id, o := range t.orders {
+		if o.symbol == symbol {
+			delete(t.orders, id)
+		}
+	}
+	return nil
+}
+
+func (t *Trader) cancelByKind(symbol string, kind orderKind) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for id, o := range t.orders {
+		if o.symbol == symbol && o.kind == kind {
+			delete(t.orders, id)
+		}
+	}
+	return nil
+}
+
+// dropAssociatedOrders is called after closing a position; assumes lock is held.
+func (t *Trader) dropAssociatedOrders(symbol string) {
+	for id, o := range t.orders {
+		if o.symbol == symbol {
+			delete(t.orders, id)
+		}
+	}
+}
+
+// FormatQuantity rounds to 6dp; the prompt rules constrain real precision elsewhere.
+func (t *Trader) FormatQuantity(symbol string, quantity float64) (string, error) {
+	if quantity <= 0 {
+		return "0", fmt.Errorf("paper: quantity must be > 0")
+	}
+	return fmt.Sprintf("%.6f", quantity), nil
+}
+
+// GetOrderStatus reports order status for a paper order ID.
+//   - market open/close orders fill instantly so we report FILLED via closed history;
+//   - pending stop/TP orders report NEW;
+//   - unknown IDs return CANCELED to keep the caller flow unblocked.
+func (t *Trader) GetOrderStatus(symbol, orderID string) (map[string]interface{}, error) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	if o, ok := t.orders[orderID]; ok {
+		return map[string]interface{}{
+			"status":      "NEW",
+			"symbol":      o.symbol,
+			"avgPrice":    0.0,
+			"executedQty": 0.0,
+			"commission":  0.0,
+		}, nil
+	}
+	for _, rec := range t.closed {
+		if rec.OrderID == orderID {
+			return map[string]interface{}{
+				"status":      "FILLED",
+				"symbol":      rec.Symbol,
+				"avgPrice":    rec.ExitPrice,
+				"executedQty": rec.Quantity,
+				"commission":  rec.Fee,
+			}, nil
+		}
+	}
+	return map[string]interface{}{
+		"status":      "CANCELED",
+		"symbol":      symbol,
+		"avgPrice":    0.0,
+		"executedQty": 0.0,
+		"commission":  0.0,
+	}, nil
+}
+
+// GetClosedPnL returns realized close records since startTime, capped to limit.
+func (t *Trader) GetClosedPnL(startTime time.Time, limit int) ([]types.ClosedPnLRecord, error) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	if limit <= 0 {
+		limit = 100
+	}
+	out := make([]types.ClosedPnLRecord, 0, len(t.closed))
+	for i := len(t.closed) - 1; i >= 0 && len(out) < limit; i-- {
+		rec := t.closed[i]
+		if !startTime.IsZero() && rec.ExitTime.Before(startTime) {
+			break
+		}
+		out = append(out, rec)
+	}
+	return out, nil
+}
+
+// GetOpenOrders returns currently pending paper orders for a symbol (or all if "").
+func (t *Trader) GetOpenOrders(symbol string) ([]types.OpenOrder, error) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	out := make([]types.OpenOrder, 0, len(t.orders))
+	for _, o := range t.orders {
+		if symbol != "" && o.symbol != symbol {
+			continue
+		}
+		out = append(out, types.OpenOrder{
+			OrderID:      o.id,
+			Symbol:       o.symbol,
+			Side:         o.side,
+			PositionSide: o.positionSide,
+			Type:         string(o.kind),
+			Price:        o.price,
+			StopPrice:    o.stopPrice,
+			Quantity:     o.quantity,
+			Status:       "NEW",
+		})
+	}
+	return out, nil
+}
+
+// ---------------------------------------------------------------------------
+// helpers
+// ---------------------------------------------------------------------------
+
+func unrealizedPnL(p *Position, mark float64) float64 {
+	if p == nil || p.Quantity == 0 {
+		return 0
+	}
+	if p.Side == "long" {
+		return (mark - p.EntryPrice) * p.Quantity
+	}
+	return (p.EntryPrice - mark) * p.Quantity
+}
+
+func realizedPnL(p *Position, exit float64, qty float64) float64 {
+	if p == nil || qty == 0 {
+		return 0
+	}
+	if p.Side == "long" {
+		return (exit - p.EntryPrice) * qty
+	}
+	return (p.EntryPrice - exit) * qty
+}
+
+// positionMargin estimates margin locked by a position — notional / leverage.
+func positionMargin(p *Position) float64 {
+	if p == nil || p.Leverage <= 0 {
+		return 0
+	}
+	return (p.EntryPrice * p.Quantity) / float64(p.Leverage)
+}
+
+// estimatedLiquidationPrice gives a rough isolated-margin liquidation price.
+// Long: entry * (1 - 1/leverage). Short: entry * (1 + 1/leverage).
+// Real exchanges use mark-price + maintenance margin; this is intentionally
+// approximate and only used for display fields in GetPositions.
+func estimatedLiquidationPrice(p *Position) float64 {
+	if p == nil || p.Leverage <= 0 {
+		return 0
+	}
+	bumper := 1.0 / float64(p.Leverage)
+	if p.Side == "long" {
+		return p.EntryPrice * (1 - bumper)
+	}
+	return p.EntryPrice * (1 + bumper)
+}
+

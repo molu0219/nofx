@@ -21,6 +21,7 @@ import (
 	"nofx/trader/kucoin"
 	"nofx/trader/lighter"
 	"nofx/trader/okx"
+	"nofx/trader/paper"
 
 	"github.com/gin-gonic/gin"
 )
@@ -258,6 +259,8 @@ func buildExchangeProbeTrader(exchangeCfg *store.Exchange, userID string) (trade
 			exchangeCfg.LighterAPIKeyIndex,
 			false,
 		)
+	case "paper":
+		return paper.New(paper.Config{InitialBalance: 10000, FeeBps: 5})
 	default:
 		return nil, fmt.Errorf("unsupported exchange type: %s", exchangeCfg.ExchangeType)
 	}

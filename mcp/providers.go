@@ -13,6 +13,10 @@ const (
 	ProviderKimi     = "kimi"
 	ProviderMiniMax  = "minimax"
 
+	// ProviderClaudeCLI shells out to the local `claude` (Claude Code CLI) binary.
+	// Auth is delegated to the binary (OAuth subscription or its own ANTHROPIC_API_KEY).
+	ProviderClaudeCLI = "claudecli"
+
 	ProviderClaw402 = "claw402"
 
 	// Default DeepSeek configuration (used as fallback in NewClient)
