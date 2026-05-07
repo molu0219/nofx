@@ -37,6 +37,14 @@ import (
 // so tests can inject deterministic prices instead of hitting the real market.
 type MarkPriceFunc func(symbol string) (float64, error)
 
+// FundingRateFunc returns the current 8h funding rate for a symbol. Sign
+// follows industry convention: positive = longs pay shorts.
+type FundingRateFunc func(symbol string) (float64, error)
+
+// NowFunc returns the current time. Tests inject deterministic clocks; production
+// uses time.Now.
+type NowFunc func() time.Time
+
 // DefaultMarkPriceFunc resolves the price via the production market data layer.
 func DefaultMarkPriceFunc(symbol string) (float64, error) {
 	d, err := market.Get(symbol)
@@ -48,6 +56,25 @@ func DefaultMarkPriceFunc(symbol string) (float64, error) {
 	}
 	return d.CurrentPrice, nil
 }
+
+// DefaultFundingRateFunc reads the latest funding rate from the production
+// market data layer. Returns 0 (no funding) if the venue doesn't publish one
+// for that symbol — that's the most conservative default for paper.
+func DefaultFundingRateFunc(symbol string) (float64, error) {
+	d, err := market.Get(symbol)
+	if err != nil {
+		return 0, nil // soft fail: skip funding this tick rather than break the loop
+	}
+	if d == nil {
+		return 0, nil
+	}
+	return d.FundingRate, nil
+}
+
+// FundingIntervalHours is the cadence at which funding is settled. 8h matches
+// Binance / OKX / Bybit USDT-M perp convention; some venues use 1h or 4h.
+// Constant here for simplicity — promote to Config when V2 adds per-symbol overrides.
+const FundingIntervalHours = 8
 
 // Position represents an open virtual position.
 type Position struct {
@@ -95,28 +122,33 @@ type Trader struct {
 	mu sync.RWMutex
 
 	// Settings — set once at construction; read-only afterwards.
-	feeBps        float64       // taker fee in basis points; e.g. 5 = 0.05%
-	getMarkPrice  MarkPriceFunc // injectable for tests
-	leverageBySym map[string]int
+	feeBps          float64         // taker fee in basis points; e.g. 5 = 0.05%
+	getMarkPrice    MarkPriceFunc   // injectable for tests
+	getFundingRate  FundingRateFunc // injectable for tests
+	now             NowFunc         // injectable clock; production uses time.Now
+	leverageBySym   map[string]int
 
 	// Persistence — optional. Both must be set together or both nil/empty.
 	store      *store.Store
 	exchangeID string
 
 	// Mutable state.
-	balance       float64                  // wallet balance (USDT). Only fees, realized PnL, and liquidation losses move this.
-	positions     map[string]*Position     // by symbol
-	orders        map[string]*pendingOrder // pending stop-loss / take-profit / limit orders
-	closed        []types.ClosedPnLRecord
-	orderSeq      uint64
-	isCrossMargin bool // false = isolated (V1 default; liquidation math assumes isolated)
+	balance         float64                  // wallet balance (USDT). Only fees, realized PnL, liquidation losses, and funding payments move this.
+	positions       map[string]*Position     // by symbol
+	orders          map[string]*pendingOrder // pending stop-loss / take-profit / limit orders
+	closed          []types.ClosedPnLRecord
+	orderSeq        uint64
+	isCrossMargin   bool      // false = isolated (V1 default; liquidation math assumes isolated)
+	lastFundingTime time.Time // most recent funding boundary that has been applied
 }
 
 // Config is the paper trader configuration.
 type Config struct {
-	InitialBalance float64       // starting USDT balance; required (>0) when no persisted state exists
-	FeeBps         float64       // optional taker fee bps (default 5)
-	MarkPriceFunc  MarkPriceFunc // optional override (defaults to live market data)
+	InitialBalance  float64         // starting USDT balance; required (>0) when no persisted state exists
+	FeeBps          float64         // optional taker fee bps (default 5)
+	MarkPriceFunc   MarkPriceFunc   // optional override (defaults to live market data)
+	FundingRateFunc FundingRateFunc // optional override (defaults to live market data; tests inject deterministic rates)
+	NowFunc         NowFunc         // optional override (defaults to time.Now; tests inject deterministic clocks)
 
 	// Persistence (both required together, both optional). When provided, the
 	// trader hydrates from store on construction and writes the full state
@@ -145,6 +177,14 @@ func New(cfg Config) (*Trader, error) {
 	if mp == nil {
 		mp = DefaultMarkPriceFunc
 	}
+	fr := cfg.FundingRateFunc
+	if fr == nil {
+		fr = DefaultFundingRateFunc
+	}
+	nw := cfg.NowFunc
+	if nw == nil {
+		nw = func() time.Time { return time.Now().UTC() }
+	}
 
 	// Persistence is opt-in but all-or-nothing — both fields must agree.
 	persistEnabled := cfg.Store != nil && cfg.ExchangeID != ""
@@ -153,13 +193,15 @@ func New(cfg Config) (*Trader, error) {
 	}
 
 	t := &Trader{
-		feeBps:        cfg.FeeBps,
-		getMarkPrice:  mp,
-		leverageBySym: make(map[string]int),
-		store:         cfg.Store,
-		exchangeID:    cfg.ExchangeID,
-		positions:     make(map[string]*Position),
-		orders:        make(map[string]*pendingOrder),
+		feeBps:         cfg.FeeBps,
+		getMarkPrice:   mp,
+		getFundingRate: fr,
+		now:            nw,
+		leverageBySym:  make(map[string]int),
+		store:          cfg.Store,
+		exchangeID:     cfg.ExchangeID,
+		positions:      make(map[string]*Position),
+		orders:         make(map[string]*pendingOrder),
 	}
 
 	if persistEnabled {
@@ -273,6 +315,7 @@ func (t *Trader) tryHydrate() (bool, error) {
 	t.closed = snap.Closed
 	t.balance = row.Balance
 	t.isCrossMargin = row.IsCrossMargin
+	t.lastFundingTime = row.LastFundingTime
 	atomic.StoreUint64(&t.orderSeq, row.OrderSeq)
 	return true, nil
 }
@@ -304,13 +347,14 @@ func (t *Trader) persistLocked() error {
 	}
 
 	row := &store.PaperState{
-		ExchangeID:    t.exchangeID,
-		Balance:       t.balance,
-		IsCrossMargin: t.isCrossMargin,
-		OrderSeq:      atomic.LoadUint64(&t.orderSeq),
-		PositionsJSON: string(posJSON),
-		OrdersJSON:    string(ordJSON),
-		ClosedJSON:    string(clsJSON),
+		ExchangeID:      t.exchangeID,
+		Balance:         t.balance,
+		IsCrossMargin:   t.isCrossMargin,
+		OrderSeq:        atomic.LoadUint64(&t.orderSeq),
+		LastFundingTime: t.lastFundingTime,
+		PositionsJSON:   string(posJSON),
+		OrdersJSON:      string(ordJSON),
+		ClosedJSON:      string(clsJSON),
 	}
 	return t.store.PaperState().Save(row)
 }
@@ -340,7 +384,7 @@ func (t *Trader) nextOrderID(prefix string) string {
 func (t *Trader) GetBalance() (map[string]interface{}, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.settleLiquidationsLocked()
+	t.tickLocked()
 
 	unrealized := 0.0
 	margin := 0.0
@@ -370,7 +414,7 @@ func (t *Trader) GetBalance() (map[string]interface{}, error) {
 func (t *Trader) GetPositions() ([]map[string]interface{}, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.settleLiquidationsLocked()
+	t.tickLocked()
 
 	out := make([]map[string]interface{}, 0, len(t.positions))
 	for _, p := range t.positions {
@@ -422,9 +466,9 @@ func (t *Trader) openPosition(symbol, side string, quantity float64, leverage in
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	// Settle any liquidations against the latest tick *before* the margin check
-	// so a freshly-blown position frees its margin.
-	t.settleLiquidationsLocked()
+	// Run a tick before the margin check so a freshly-blown position frees its
+	// margin and any newly-triggered SL/TP free their orders.
+	t.tickLocked()
 
 	notional := quantity * price
 	fee := notional * (t.feeBps / 10000.0)
@@ -853,15 +897,205 @@ func (t *Trader) totalMarginLockedLocked() float64 {
 	return sum
 }
 
+// tickLocked is the single entry point for periodic state advancement. It
+// applies funding (if a funding boundary has elapsed), settles liquidations,
+// then triggers stop-loss and take-profit orders. Every Get* and Open path
+// calls this first so the caller sees up-to-date state. Caller MUST hold
+// t.mu (write). Persists once at end if anything changed.
+func (t *Trader) tickLocked() {
+	changed := false
+	if t.applyFundingLocked() {
+		changed = true
+	}
+	if t.settleLiquidationsLocked() {
+		changed = true
+	}
+	if t.triggerStopOrdersLocked() {
+		changed = true
+	}
+	if changed {
+		t.persistOrLog("tick")
+	}
+}
+
+// nextFundingBoundary returns the next funding settlement time at or after t.
+// 8h cycles align to UTC midnight (00:00, 08:00, 16:00) — same convention as
+// Binance / Bybit / OKX USDT-M perps.
+func nextFundingBoundary(t time.Time, intervalHours int) time.Time {
+	t = t.UTC()
+	dayStart := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+	for h := 0; h <= 24; h += intervalHours {
+		boundary := dayStart.Add(time.Duration(h) * time.Hour)
+		if !boundary.Before(t) {
+			return boundary
+		}
+	}
+	return dayStart.Add(24 * time.Hour) // unreachable in normal usage
+}
+
+// applyFundingLocked charges/credits funding to every open position once per
+// funding cycle. Convention: positive funding rate → longs pay shorts, so for
+// a long position the wallet is debited `notional × rate`, for a short it's
+// credited. Multiple missed cycles (e.g. paper trader was down for a day) are
+// applied in sequence so PnL stays continuous across restarts. Caller MUST
+// hold t.mu (write).
+func (t *Trader) applyFundingLocked() (changed bool) {
+	if len(t.positions) == 0 {
+		// Still update the cursor so we don't apply funding retroactively when
+		// a position opens later.
+		now := t.now()
+		if t.lastFundingTime.IsZero() {
+			t.lastFundingTime = nextFundingBoundary(now, FundingIntervalHours).Add(-time.Duration(FundingIntervalHours) * time.Hour)
+		}
+		return false
+	}
+	now := t.now()
+	if t.lastFundingTime.IsZero() {
+		// First-ever tick with positions: anchor at the previous boundary so
+		// the next crossed boundary triggers a real charge.
+		t.lastFundingTime = nextFundingBoundary(now, FundingIntervalHours).Add(-time.Duration(FundingIntervalHours) * time.Hour)
+	}
+
+	cursor := t.lastFundingTime
+	for {
+		boundary := nextFundingBoundary(cursor.Add(time.Nanosecond), FundingIntervalHours)
+		if boundary.After(now) {
+			break
+		}
+		// Apply funding for every open position at this boundary.
+		for sym, p := range t.positions {
+			rate, err := t.getFundingRate(sym)
+			if err != nil || rate == 0 {
+				continue
+			}
+			notional := p.Quantity * p.EntryPrice
+			payment := notional * rate
+			// long with positive rate → pays (debit). short with positive rate → receives (credit).
+			if p.Side == "long" {
+				t.balance -= payment
+			} else {
+				t.balance += payment
+			}
+			changed = true
+			logger.Infof("📄 [paper] FUNDING %s %s rate=%.6f payment=%.6f balance=%.2f at %s",
+				strings.ToUpper(p.Side), sym, rate, payment, t.balance, boundary.Format(time.RFC3339))
+		}
+		t.lastFundingTime = boundary
+		cursor = boundary
+	}
+	return changed
+}
+
+// triggerStopOrdersLocked closes any position whose mark price has crossed a
+// stop-loss or take-profit trigger. Fills happen at the trigger price (V1
+// simplification — real exchanges fill at the next available market price,
+// which can differ during fast moves). Returns true if any order fired.
+func (t *Trader) triggerStopOrdersLocked() (changed bool) {
+	type fire struct {
+		orderID  string
+		symbol   string
+		side     string // long / short of the position being closed
+		triggerP float64
+		kind     orderKind
+	}
+	var fires []fire
+
+	for id, o := range t.orders {
+		if o.kind != orderStopLoss && o.kind != orderTakeProfit {
+			continue
+		}
+		pos, ok := t.positions[o.symbol]
+		if !ok {
+			// Stale order without an open position — drop it.
+			delete(t.orders, id)
+			changed = true
+			continue
+		}
+		mark, err := t.getMarkPrice(o.symbol)
+		if err != nil {
+			continue
+		}
+		if !shouldTrigger(o, pos.Side, mark) {
+			continue
+		}
+		fires = append(fires, fire{
+			orderID: id, symbol: o.symbol, side: pos.Side, triggerP: o.stopPrice, kind: o.kind,
+		})
+	}
+
+	for _, f := range fires {
+		pos, ok := t.positions[f.symbol]
+		if !ok {
+			continue
+		}
+		realized := realizedPnL(pos, f.triggerP, pos.Quantity)
+		notional := pos.Quantity * f.triggerP
+		fee := notional * (t.feeBps / 10000.0)
+		t.balance += realized - fee
+
+		closeType := "stop_loss"
+		if f.kind == orderTakeProfit {
+			closeType = "take_profit"
+		}
+		t.closed = append(t.closed, types.ClosedPnLRecord{
+			Symbol:      f.symbol,
+			Side:        f.side,
+			EntryPrice:  pos.EntryPrice,
+			ExitPrice:   f.triggerP,
+			Quantity:    pos.Quantity,
+			RealizedPnL: realized - fee,
+			Fee:         fee,
+			Leverage:    pos.Leverage,
+			EntryTime:   pos.OpenedAt,
+			ExitTime:    t.now(),
+			OrderID:     t.nextOrderID("TRIG"),
+			CloseType:   closeType,
+			ExchangeID:  "paper",
+		})
+		// Drop the position and ALL its orders (TP cancelled when SL hits and vice versa).
+		delete(t.positions, f.symbol)
+		for id, o := range t.orders {
+			if o.symbol == f.symbol {
+				delete(t.orders, id)
+			}
+		}
+		changed = true
+		logger.Infof("📄 [paper] %s %s %s qty=%.6f trigger=%.4f realized=%.4f balance=%.2f",
+			strings.ToUpper(closeType), strings.ToUpper(f.side), f.symbol, pos.Quantity, f.triggerP, realized, t.balance)
+	}
+	return changed
+}
+
+// shouldTrigger reports whether a pending stop-loss / take-profit order should
+// fire given the current mark and the side of the position protecting it.
+//
+// Stop-loss is the protective floor (long) or ceiling (short):
+//   - long  SL: fire when mark ≤ stopPrice
+//   - short SL: fire when mark ≥ stopPrice
+//
+// Take-profit is the opposite: long TP fires when mark rises past it; short TP
+// fires when mark falls past it.
+func shouldTrigger(o *pendingOrder, posSide string, mark float64) bool {
+	switch {
+	case o.kind == orderStopLoss && posSide == "long":
+		return mark <= o.stopPrice
+	case o.kind == orderStopLoss && posSide == "short":
+		return mark >= o.stopPrice
+	case o.kind == orderTakeProfit && posSide == "long":
+		return mark >= o.stopPrice
+	case o.kind == orderTakeProfit && posSide == "short":
+		return mark <= o.stopPrice
+	default:
+		return false
+	}
+}
+
 // settleLiquidationsLocked force-closes any position whose mark price has
 // crossed its liquidation level. The full initial margin is written off (no
 // "remainder returned to wallet" — V1 simplification consistent with isolated
 // liquidation losing the entire margin). Caller MUST hold t.mu (write).
-//
-// State changes here flush to the store at the end so a liquidation event
-// survives a crash.
-func (t *Trader) settleLiquidationsLocked() {
-	liquidated := false
+// Returns true if any position was liquidated.
+func (t *Trader) settleLiquidationsLocked() (changed bool) {
 	for sym, p := range t.positions {
 		mark, err := t.getMarkPrice(sym)
 		if err != nil {
@@ -902,10 +1136,11 @@ func (t *Trader) settleLiquidationsLocked() {
 
 		logger.Infof("📄 [paper] LIQUIDATED %s %s qty=%.6f mark=%.4f liq=%.4f loss=%.4f balance=%.2f",
 			strings.ToUpper(p.Side), sym, p.Quantity, mark, liq, margin, t.balance)
-		liquidated = true
+		changed = true
 	}
-	if liquidated {
-		t.persistOrLog("liquidation")
-	}
+	return changed
 }
+
+// Time helper — exposed so tests can confirm the funding clock.
+func (t *Trader) lastFundingTimeUnsafe() time.Time { return t.lastFundingTime }
 

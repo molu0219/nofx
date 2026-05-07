@@ -322,6 +322,247 @@ func TestSetMarginMode_StoresFlag(t *testing.T) {
 	}
 }
 
+// ─── Funding rate accrual ─────────────────────────────────────────────────
+
+// fixedFundingRate gives the test deterministic per-symbol funding rates.
+type fixedFundingRate struct {
+	mu   sync.Mutex
+	rate map[string]float64
+}
+
+func (f *fixedFundingRate) get(symbol string) (float64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.rate[symbol], nil
+}
+
+// stepClock returns whatever time was set on it; tests advance it explicitly.
+type stepClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (c *stepClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *stepClock) set(t time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = t.UTC()
+}
+
+func TestFunding_LongPaysWhenRatePositive(t *testing.T) {
+	mp := &fixedMarkPrice{price: map[string]float64{"BTCUSDT": 100}}
+	fr := &fixedFundingRate{rate: map[string]float64{"BTCUSDT": 0.01}} // 1% per cycle
+	clk := &stepClock{t: time.Date(2026, 5, 7, 7, 30, 0, 0, time.UTC)}
+
+	tr, err := New(Config{
+		InitialBalance: 1_000, FeeBps: 0,
+		MarkPriceFunc: mp.get, FundingRateFunc: fr.get, NowFunc: clk.now,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := tr.OpenLong("BTCUSDT", 1, 5); err != nil { // notional 100, 5x → margin 20
+		t.Fatalf("OpenLong: %v", err)
+	}
+
+	// No boundary crossed yet — same hour as open.
+	tr.GetBalance()
+	bal, _ := tr.GetBalance()
+	if got, _ := bal["totalWalletBalance"].(float64); got != 1_000 {
+		t.Fatalf("pre-funding balance moved unexpectedly: %.4f", got)
+	}
+
+	// Advance to 08:01 — crosses 08:00 boundary, one cycle of funding due.
+	// long pays notional × rate = 100 × 0.01 = 1.0
+	clk.set(time.Date(2026, 5, 7, 8, 1, 0, 0, time.UTC))
+	bal, _ = tr.GetBalance()
+	got, _ := bal["totalWalletBalance"].(float64)
+	if got != 999 {
+		t.Fatalf("after 1 funding cycle balance got=%.4f want=999.00", got)
+	}
+
+	// Idempotency: another GetBalance at the same clock should NOT re-charge.
+	bal, _ = tr.GetBalance()
+	if got2, _ := bal["totalWalletBalance"].(float64); got2 != 999 {
+		t.Fatalf("funding double-charged: %.4f", got2)
+	}
+}
+
+func TestFunding_ShortReceivesWhenRatePositive(t *testing.T) {
+	mp := &fixedMarkPrice{price: map[string]float64{"ETHUSDT": 100}}
+	fr := &fixedFundingRate{rate: map[string]float64{"ETHUSDT": 0.01}}
+	clk := &stepClock{t: time.Date(2026, 5, 7, 7, 30, 0, 0, time.UTC)}
+
+	tr, _ := New(Config{
+		InitialBalance: 1_000, FeeBps: 0,
+		MarkPriceFunc: mp.get, FundingRateFunc: fr.get, NowFunc: clk.now,
+	})
+	if _, err := tr.OpenShort("ETHUSDT", 1, 5); err != nil {
+		t.Fatalf("OpenShort: %v", err)
+	}
+	clk.set(time.Date(2026, 5, 7, 8, 1, 0, 0, time.UTC))
+	bal, _ := tr.GetBalance()
+	if got, _ := bal["totalWalletBalance"].(float64); got != 1_001 {
+		t.Fatalf("short funding credit: got=%.4f want=1001.00", got)
+	}
+}
+
+func TestFunding_AccruesMultipleMissedCycles(t *testing.T) {
+	mp := &fixedMarkPrice{price: map[string]float64{"BTCUSDT": 100}}
+	fr := &fixedFundingRate{rate: map[string]float64{"BTCUSDT": 0.001}} // 0.1%
+	clk := &stepClock{t: time.Date(2026, 5, 7, 7, 30, 0, 0, time.UTC)}
+
+	tr, _ := New(Config{
+		InitialBalance: 1_000, FeeBps: 0,
+		MarkPriceFunc: mp.get, FundingRateFunc: fr.get, NowFunc: clk.now,
+	})
+	_, _ = tr.OpenLong("BTCUSDT", 1, 5)
+
+	// Skip a full day → 3 funding cycles (08, 16, 00 next day).
+	clk.set(time.Date(2026, 5, 8, 0, 30, 0, 0, time.UTC))
+	bal, _ := tr.GetBalance()
+	got, _ := bal["totalWalletBalance"].(float64)
+	want := 1000 - 3*0.1 // 999.7
+	if abs(got-want) > 1e-9 {
+		t.Fatalf("3-cycle funding: got=%.6f want=%.6f", got, want)
+	}
+}
+
+func TestFunding_NoOpWithZeroRate(t *testing.T) {
+	mp := &fixedMarkPrice{price: map[string]float64{"BTCUSDT": 100}}
+	fr := &fixedFundingRate{rate: map[string]float64{"BTCUSDT": 0}}
+	clk := &stepClock{t: time.Date(2026, 5, 7, 7, 30, 0, 0, time.UTC)}
+
+	tr, _ := New(Config{
+		InitialBalance: 1_000, FeeBps: 0,
+		MarkPriceFunc: mp.get, FundingRateFunc: fr.get, NowFunc: clk.now,
+	})
+	_, _ = tr.OpenLong("BTCUSDT", 1, 5)
+	clk.set(time.Date(2026, 5, 8, 0, 30, 0, 0, time.UTC)) // 3 cycles passed
+	bal, _ := tr.GetBalance()
+	if got, _ := bal["totalWalletBalance"].(float64); got != 1_000 {
+		t.Fatalf("zero-rate funding moved balance: %.4f", got)
+	}
+}
+
+// ─── Stop-loss / take-profit auto-trigger ─────────────────────────────────
+
+func TestStopLoss_LongFiresOnDownCross(t *testing.T) {
+	mp := &fixedMarkPrice{price: map[string]float64{"BTCUSDT": 100}}
+	tr, _ := newPaperWith(t, 1_000, map[string]float64{"BTCUSDT": 100})
+	tr.getMarkPrice = mp.get // re-bind so we can move price after construction
+
+	if _, err := tr.OpenLong("BTCUSDT", 1, 5); err != nil {
+		t.Fatalf("OpenLong: %v", err)
+	}
+	if err := tr.SetStopLoss("BTCUSDT", "LONG", 1, 95); err != nil {
+		t.Fatalf("SetStopLoss: %v", err)
+	}
+
+	mp.set("BTCUSDT", 94) // below SL trigger
+	pos, _ := tr.GetPositions()
+	if len(pos) != 0 {
+		t.Fatalf("SL should have fired; %d positions remain", len(pos))
+	}
+	closed, _ := tr.GetClosedPnL(time.Time{}, 10)
+	if len(closed) != 1 || closed[0].CloseType != "stop_loss" {
+		t.Fatalf("expected one stop_loss record, got %+v", closed)
+	}
+	if closed[0].ExitPrice != 95 {
+		t.Fatalf("SL fill price got=%.4f want=95 (trigger price, V1)", closed[0].ExitPrice)
+	}
+	// realized = (95-100)*1 = -5, fee 0 (no fee in this test)
+	if closed[0].RealizedPnL != -5 {
+		t.Fatalf("SL realized got=%.4f want=-5", closed[0].RealizedPnL)
+	}
+}
+
+func TestTakeProfit_LongFiresOnUpCross(t *testing.T) {
+	mp := &fixedMarkPrice{price: map[string]float64{"BTCUSDT": 100}}
+	tr, _ := newPaperWith(t, 1_000, map[string]float64{"BTCUSDT": 100})
+	tr.getMarkPrice = mp.get
+
+	_, _ = tr.OpenLong("BTCUSDT", 1, 5)
+	_ = tr.SetTakeProfit("BTCUSDT", "LONG", 1, 110)
+
+	mp.set("BTCUSDT", 111)
+	pos, _ := tr.GetPositions()
+	if len(pos) != 0 {
+		t.Fatalf("TP should have fired")
+	}
+	closed, _ := tr.GetClosedPnL(time.Time{}, 10)
+	if closed[0].CloseType != "take_profit" {
+		t.Fatalf("expected take_profit, got %s", closed[0].CloseType)
+	}
+	if closed[0].RealizedPnL != 10 {
+		t.Fatalf("TP realized got=%.4f want=10", closed[0].RealizedPnL)
+	}
+}
+
+func TestStopLoss_ShortFiresOnUpCross(t *testing.T) {
+	mp := &fixedMarkPrice{price: map[string]float64{"ETHUSDT": 100}}
+	tr, _ := newPaperWith(t, 1_000, map[string]float64{"ETHUSDT": 100})
+	tr.getMarkPrice = mp.get
+
+	_, _ = tr.OpenShort("ETHUSDT", 1, 5)
+	_ = tr.SetStopLoss("ETHUSDT", "SHORT", 1, 105)
+
+	mp.set("ETHUSDT", 106)
+	pos, _ := tr.GetPositions()
+	if len(pos) != 0 {
+		t.Fatalf("short SL should have fired")
+	}
+}
+
+func TestTriggers_OppositeOrderCancelledOnFill(t *testing.T) {
+	mp := &fixedMarkPrice{price: map[string]float64{"BTCUSDT": 100}}
+	tr, _ := newPaperWith(t, 1_000, map[string]float64{"BTCUSDT": 100})
+	tr.getMarkPrice = mp.get
+
+	_, _ = tr.OpenLong("BTCUSDT", 1, 5)
+	_ = tr.SetStopLoss("BTCUSDT", "LONG", 1, 95)
+	_ = tr.SetTakeProfit("BTCUSDT", "LONG", 1, 110)
+
+	mp.set("BTCUSDT", 111) // TP fires
+	_, _ = tr.GetPositions()
+	open, _ := tr.GetOpenOrders("BTCUSDT")
+	if len(open) != 0 {
+		t.Fatalf("SL should have been cancelled when TP fired; remaining: %d", len(open))
+	}
+}
+
+func TestTriggers_DoNotFireWhenMarkInsideRange(t *testing.T) {
+	mp := &fixedMarkPrice{price: map[string]float64{"BTCUSDT": 100}}
+	tr, _ := newPaperWith(t, 1_000, map[string]float64{"BTCUSDT": 100})
+	tr.getMarkPrice = mp.get
+
+	_, _ = tr.OpenLong("BTCUSDT", 1, 5)
+	_ = tr.SetStopLoss("BTCUSDT", "LONG", 1, 95)
+	_ = tr.SetTakeProfit("BTCUSDT", "LONG", 1, 110)
+
+	mp.set("BTCUSDT", 102)
+	pos, _ := tr.GetPositions()
+	if len(pos) != 1 {
+		t.Fatalf("position should still be open at 102, got %d", len(pos))
+	}
+	open, _ := tr.GetOpenOrders("BTCUSDT")
+	if len(open) != 2 {
+		t.Fatalf("orders should still be open, got %d", len(open))
+	}
+}
+
+func abs(x float64) float64 {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+
 // ─── Persistence ───────────────────────────────────────────────────────────
 
 // newPaperStore constructs an isolated in-memory SQLite-backed store for tests.

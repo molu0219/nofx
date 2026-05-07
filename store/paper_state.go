@@ -19,14 +19,15 @@ import (
 // atomic, cheap, and avoids leaking the paper trader's internal types across
 // the schema.
 type PaperState struct {
-	ExchangeID    string    `gorm:"primaryKey;column:exchange_id" json:"exchange_id"`
-	Balance       float64   `gorm:"not null;default:0" json:"balance"`
-	IsCrossMargin bool      `gorm:"column:is_cross_margin;default:false" json:"is_cross_margin"`
-	OrderSeq      uint64    `gorm:"column:order_seq;default:0" json:"order_seq"`
-	PositionsJSON string    `gorm:"type:text;column:positions_json" json:"positions_json"`
-	OrdersJSON    string    `gorm:"type:text;column:orders_json" json:"orders_json"`
-	ClosedJSON    string    `gorm:"type:text;column:closed_json" json:"closed_json"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	ExchangeID       string    `gorm:"primaryKey;column:exchange_id" json:"exchange_id"`
+	Balance          float64   `gorm:"not null;default:0" json:"balance"`
+	IsCrossMargin    bool      `gorm:"column:is_cross_margin;default:false" json:"is_cross_margin"`
+	OrderSeq         uint64    `gorm:"column:order_seq;default:0" json:"order_seq"`
+	LastFundingTime  time.Time `gorm:"column:last_funding_time" json:"last_funding_time"`
+	PositionsJSON    string    `gorm:"type:text;column:positions_json" json:"positions_json"`
+	OrdersJSON       string    `gorm:"type:text;column:orders_json" json:"orders_json"`
+	ClosedJSON       string    `gorm:"type:text;column:closed_json" json:"closed_json"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 // TableName overrides GORM's pluralization to keep table naming consistent.
