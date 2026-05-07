@@ -115,6 +115,11 @@ type StrategyConfig struct {
 	// and proposes bounded mutations. See kernel/strategy_optimizer.go.
 	AutoOptimize AutoOptimizeConfig `json:"auto_optimize,omitempty"`
 
+	// Objective: the user-stated success metric the optimizer evaluates
+	// against. Without one the optimizer is "improve at role" (fuzzy);
+	// with one it can compare current trajectory to target.
+	Objective ObjectiveConfig `json:"objective,omitempty"`
+
 	// Grid trading configuration (only used when StrategyType == "grid_trading")
 	GridConfig *GridStrategyConfig `json:"grid_config,omitempty"`
 }
@@ -177,6 +182,35 @@ type AutoOptimizeConfig struct {
 	// MinIntervalMinutes is the wall-clock floor between reviews
 	// regardless of cycle count; 0 → use default 30 minutes.
 	MinIntervalMinutes int `json:"min_interval_minutes,omitempty"`
+}
+
+// ObjectiveConfig is the user-stated success metric the optimizer evaluates
+// performance against. Without an explicit objective the optimizer can only
+// "improve at the trader's role" — fuzzy and unmeasurable. With one, the
+// meta-AI can compare current trajectory against target and propose
+// data-driven tweaks (e.g. "Sharpe 0.8 vs target 1.5, drop low-PF altcoins").
+//
+// Empty struct → no objective set; optimizer falls back to role-only review.
+type ObjectiveConfig struct {
+	// PrimaryMetric is the headline number the optimizer targets.
+	// Allowed values: "daily_roi", "total_roi", "sharpe_ratio",
+	// "profit_factor", "win_rate", "max_drawdown_floor". Empty = no metric.
+	PrimaryMetric string `json:"primary_metric,omitempty"`
+	// PrimaryTarget is the numeric target. Interpretation depends on metric:
+	// daily_roi/total_roi → percent (10.0 means 10%), sharpe_ratio/
+	// profit_factor → unit-less ratio, win_rate → percent (60.0 = 60%),
+	// max_drawdown_floor → percent below peak the optimizer aims to stay above.
+	PrimaryTarget float64 `json:"primary_target,omitempty"`
+	// HorizonDays is the rolling window over which the metric is evaluated.
+	// 0 → since trader inception.
+	HorizonDays int `json:"horizon_days,omitempty"`
+	// HardStopDrawdownPct triggers a forced auto-pause once the trader is
+	// down this much from peak equity. 0 → no hard stop (rely on
+	// MaxConsecutiveAIFailures escalation only).
+	HardStopDrawdownPct float64 `json:"hard_stop_drawdown_pct,omitempty"`
+	// Notes is freeform context the optimizer reads alongside the role —
+	// e.g. "prefer compound growth; size up after wins, down after losses".
+	Notes string `json:"notes,omitempty"`
 }
 
 // CoinSourceConfig coin source configuration

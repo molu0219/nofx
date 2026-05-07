@@ -41,12 +41,38 @@ type StrategyOptimizer struct {
 
 // optimizerSuggestion is the JSON shape we ask the meta-AI to produce.
 // Every field is optional; absent or null means "keep current".
+//
+// Bounds are intentionally generous (caller wanted more knobs unlocked) but
+// every numeric field still clamps in applyBounded so a runaway suggestion
+// can't, say, set leverage to 100x or zero out min_confidence.
 type optimizerSuggestion struct {
 	Reasoning           string   `json:"reasoning"`
 	MinConfidence       *int     `json:"min_confidence,omitempty"`
 	ExcludedCoinsAdd    []string `json:"excluded_coins_add,omitempty"`
 	ExcludedCoinsRemove []string `json:"excluded_coins_remove,omitempty"`
 	CustomPromptAppend  string   `json:"custom_prompt_append,omitempty"`
+
+	// Risk caps — bounded but adjustable. Letting the optimizer touch
+	// leverage and position sizing is the price of pursuing aggressive
+	// objectives like "maximise daily ROI"; the user opted in.
+	BTCETHLeverage       *int     `json:"btc_eth_max_leverage,omitempty"`
+	AltcoinLeverage      *int     `json:"altcoin_max_leverage,omitempty"`
+	MaxPositions         *int     `json:"max_positions,omitempty"`
+	BTCETHPositionRatio  *float64 `json:"btc_eth_max_position_value_ratio,omitempty"`
+	AltcoinPositionRatio *float64 `json:"altcoin_max_position_value_ratio,omitempty"`
+	MinRiskRewardRatio   *float64 `json:"min_risk_reward_ratio,omitempty"`
+
+	// Universe sizing.
+	BinanceTopLimit *int `json:"binance_top_limit,omitempty"`
+
+	// Indicator toggles — flipping these reshapes the per-cycle prompt
+	// (more or less data fed to Claude). Bool pointers so the optimizer
+	// can leave them unchanged.
+	EnableEMA  *bool `json:"enable_ema,omitempty"`
+	EnableMACD *bool `json:"enable_macd,omitempty"`
+	EnableRSI  *bool `json:"enable_rsi,omitempty"`
+	EnableATR  *bool `json:"enable_atr,omitempty"`
+	EnableBOLL *bool `json:"enable_boll,omitempty"`
 }
 
 // MaybeReview triggers a review when both the cycle counter and the wall-
@@ -140,27 +166,100 @@ func (o *StrategyOptimizer) review(cycle int) error {
 // applyBounded mutates cfg in-place with the parts of suggestion that pass
 // validation. Returns true iff at least one field was actually changed.
 //
-// Bounds (V1 — conservative):
-//   - min_confidence: clamped to [50, 95]
+// Bounds (V2 — wider than V1):
+//   - min_confidence: [50, 95]
 //   - excluded_coins: dedup + cap at 50 entries; symbols must end with USDT
-//   - custom_prompt_append: max 500 chars after concatenation; we do NOT
-//     replace the existing custom_prompt, only append a short note so user-
-//     supplied directives are never lost
+//   - custom_prompt_append: max 500 chars per call; concatenated total
+//     capped at 4000 chars
+//   - btc_eth_max_leverage: [1, 25]
+//   - altcoin_max_leverage: [1, 20]
+//   - max_positions: [1, 10]
+//   - btc_eth_max_position_value_ratio: [0.5, 20]
+//   - altcoin_max_position_value_ratio: [0.5, 20]
+//   - min_risk_reward_ratio: [1.0, 5.0]
+//   - binance_top_limit: [5, MaxCandidateCoins]
+//   - indicator toggles: any bool
 func (o *StrategyOptimizer) applyBounded(cfg *store.StrategyConfig, s optimizerSuggestion) bool {
 	changed := false
 
 	if s.MinConfidence != nil {
-		v := *s.MinConfidence
-		if v < 50 {
-			v = 50
-		}
-		if v > 95 {
-			v = 95
-		}
+		v := clampInt(*s.MinConfidence, 50, 95)
 		if v != cfg.RiskControl.MinConfidence {
 			cfg.RiskControl.MinConfidence = v
 			changed = true
 		}
+	}
+
+	if s.BTCETHLeverage != nil {
+		v := clampInt(*s.BTCETHLeverage, 1, 25)
+		if v != cfg.RiskControl.BTCETHMaxLeverage {
+			cfg.RiskControl.BTCETHMaxLeverage = v
+			changed = true
+		}
+	}
+	if s.AltcoinLeverage != nil {
+		v := clampInt(*s.AltcoinLeverage, 1, 20)
+		if v != cfg.RiskControl.AltcoinMaxLeverage {
+			cfg.RiskControl.AltcoinMaxLeverage = v
+			changed = true
+		}
+	}
+	if s.MaxPositions != nil {
+		v := clampInt(*s.MaxPositions, 1, 10)
+		if v != cfg.RiskControl.MaxPositions {
+			cfg.RiskControl.MaxPositions = v
+			changed = true
+		}
+	}
+	if s.BTCETHPositionRatio != nil {
+		v := clampFloat(*s.BTCETHPositionRatio, 0.5, 20)
+		if v != cfg.RiskControl.BTCETHMaxPositionValueRatio {
+			cfg.RiskControl.BTCETHMaxPositionValueRatio = v
+			changed = true
+		}
+	}
+	if s.AltcoinPositionRatio != nil {
+		v := clampFloat(*s.AltcoinPositionRatio, 0.5, 20)
+		if v != cfg.RiskControl.AltcoinMaxPositionValueRatio {
+			cfg.RiskControl.AltcoinMaxPositionValueRatio = v
+			changed = true
+		}
+	}
+	if s.MinRiskRewardRatio != nil {
+		v := clampFloat(*s.MinRiskRewardRatio, 1.0, 5.0)
+		if v != cfg.RiskControl.MinRiskRewardRatio {
+			cfg.RiskControl.MinRiskRewardRatio = v
+			changed = true
+		}
+	}
+
+	if s.BinanceTopLimit != nil {
+		v := clampInt(*s.BinanceTopLimit, 5, store.MaxCandidateCoins)
+		if v != cfg.CoinSource.BinanceTopLimit {
+			cfg.CoinSource.BinanceTopLimit = v
+			changed = true
+		}
+	}
+
+	if s.EnableEMA != nil && *s.EnableEMA != cfg.Indicators.EnableEMA {
+		cfg.Indicators.EnableEMA = *s.EnableEMA
+		changed = true
+	}
+	if s.EnableMACD != nil && *s.EnableMACD != cfg.Indicators.EnableMACD {
+		cfg.Indicators.EnableMACD = *s.EnableMACD
+		changed = true
+	}
+	if s.EnableRSI != nil && *s.EnableRSI != cfg.Indicators.EnableRSI {
+		cfg.Indicators.EnableRSI = *s.EnableRSI
+		changed = true
+	}
+	if s.EnableATR != nil && *s.EnableATR != cfg.Indicators.EnableATR {
+		cfg.Indicators.EnableATR = *s.EnableATR
+		changed = true
+	}
+	if s.EnableBOLL != nil && *s.EnableBOLL != cfg.Indicators.EnableBOLL {
+		cfg.Indicators.EnableBOLL = *s.EnableBOLL
+		changed = true
 	}
 
 	if len(s.ExcludedCoinsAdd) > 0 || len(s.ExcludedCoinsRemove) > 0 {
@@ -217,37 +316,80 @@ func (o *StrategyOptimizer) applyBounded(cfg *store.StrategyConfig, s optimizerS
 
 // buildSystemPrompt explains the optimizer's job and output contract.
 func (o *StrategyOptimizer) buildSystemPrompt() string {
-	return `You are a meta-controller that reviews an AI trader's recent performance and suggests minimal config tweaks. The trader uses your suggestions to adapt over time.
+	return `You are a meta-controller that reviews an AI trader's recent performance and suggests config tweaks. The trader uses your suggestions to adapt over time.
 
 Your job:
-1. Read the user's stated role (their mandate for the trader).
-2. Read the recent decisions, fills, equity curve, and current config.
-3. Decide whether anything in the config should change to better serve the user's role.
+1. Read the user's stated objective (the success metric and target).
+2. Read the user's stated role (their mandate for the trader).
+3. Read the recent decisions, fills, equity curve, and current config.
+4. Decide what config changes would move the trader closer to the objective.
 
 Strict output contract — JSON only:
 
 {
-  "reasoning": "<1-3 sentences explaining your suggestion>",
-  "min_confidence": <integer 50-95, or omit to keep current>,
-  "excluded_coins_add": ["<SYMBOLUSDT>", ...],
-  "excluded_coins_remove": ["<SYMBOLUSDT>", ...],
-  "custom_prompt_append": "<short note appended to trader's custom prompt; max 500 chars>"
+  "reasoning": "<2-4 sentences explaining the trajectory vs target and why these changes>",
+
+  // Quality / selection knobs
+  "min_confidence":          <int 50-95>,
+  "excluded_coins_add":      ["<SYMBOLUSDT>", ...],
+  "excluded_coins_remove":   ["<SYMBOLUSDT>", ...],
+  "custom_prompt_append":    "<short note for trader prompt; max 500 chars>",
+
+  // Risk / sizing
+  "btc_eth_max_leverage":              <int 1-25>,
+  "altcoin_max_leverage":              <int 1-20>,
+  "max_positions":                     <int 1-10>,
+  "btc_eth_max_position_value_ratio":  <float 0.5-20>,
+  "altcoin_max_position_value_ratio":  <float 0.5-20>,
+  "min_risk_reward_ratio":             <float 1.0-5.0>,
+
+  // Universe size (number of top-by-volume coins fed to AI per cycle)
+  "binance_top_limit":  <int 5-30>,
+
+  // Indicator toggles (more data ≠ always better; balance signal vs token cost)
+  "enable_ema":  <bool>,
+  "enable_macd": <bool>,
+  "enable_rsi":  <bool>,
+  "enable_atr":  <bool>,
+  "enable_boll": <bool>
 }
 
-Output {} if nothing should change.
+Every field is optional. Output {} if nothing should change.
 
-Constraints (the framework enforces these — going outside is wasted output):
-- Only the fields above are editable. Do NOT suggest changes to leverage, max_positions, position sizing, timeframes, or coin source.
-- min_confidence is bounded to 50-95.
+How to think about it:
+- If the objective is aggressive return (e.g. daily_roi 10%) and the trader is under-target with a healthy win-rate, consider raising leverage/position-ratio. If win-rate is bad, raise min_confidence first; size up only after quality improves.
+- If drawdown is approaching the hard-stop, cut leverage and max_positions before anything else.
+- If certain symbols repeatedly lose, exclude them.
+- Indicator toggles: turn on EMA/MACD/RSI when the trader is making clearly bad timing calls; turn them off when they don't help and you want to free up token budget for more candidates.
+- custom_prompt_append: distill a single concrete rule per review (e.g. "Open with 30% of normal size; scale up after first +2% move"). Never contradict the role.
+
+Constraints:
+- All numeric fields will be clamped to their stated ranges; going outside wastes output.
 - excluded_coins must be USDT-suffixed (e.g. "BTCUSDT").
-- custom_prompt_append is APPENDED to the existing custom prompt — never write rules that contradict what's already there; instead, refine.
-- Be conservative. Only change things when the data clearly warrants it (e.g. 3+ losing trades on the same symbol → consider excluding it; consistent over-trading → raise min_confidence). The user trusts you to refine, not gamble.
+- Be deliberate. Each change should map to specific data in the report — not guesses. The user trusts you to refine, not gamble.
 - Output JSON ONLY. No markdown fences, no commentary outside the JSON.`
 }
 
 // buildUserPrompt formats the live data the optimizer needs to make a call.
 func (o *StrategyOptimizer) buildUserPrompt(cfg *store.StrategyConfig, decisions []*store.DecisionRecord, stats *store.TraderStats, orders []*store.TraderOrder, equity []*store.EquitySnapshot) string {
 	var sb strings.Builder
+
+	sb.WriteString("# Objective (the metric we're optimising for)\n\n")
+	if cfg.Objective.PrimaryMetric != "" {
+		sb.WriteString(fmt.Sprintf("- metric: %s\n- target: %v\n", cfg.Objective.PrimaryMetric, cfg.Objective.PrimaryTarget))
+		if cfg.Objective.HorizonDays > 0 {
+			sb.WriteString(fmt.Sprintf("- horizon: %d days\n", cfg.Objective.HorizonDays))
+		}
+		if cfg.Objective.HardStopDrawdownPct > 0 {
+			sb.WriteString(fmt.Sprintf("- hard-stop drawdown: %.1f%%\n", cfg.Objective.HardStopDrawdownPct))
+		}
+		if cfg.Objective.Notes != "" {
+			sb.WriteString("- notes: " + cfg.Objective.Notes + "\n")
+		}
+	} else {
+		sb.WriteString("(no explicit objective — fall back to qualitative role-fit review)\n")
+	}
+	sb.WriteString("\n")
 
 	sb.WriteString("# User's role / mandate\n\n")
 	role := strings.TrimSpace(cfg.PromptSections.RoleDefinition)
@@ -260,16 +402,21 @@ func (o *StrategyOptimizer) buildUserPrompt(cfg *store.StrategyConfig, decisions
 	sb.WriteString(role)
 	sb.WriteString("\n\n")
 
-	sb.WriteString("# Current editable config\n\n")
+	sb.WriteString("# Current editable config (everything below can be tuned)\n\n")
 	sb.WriteString(fmt.Sprintf("- min_confidence: %d\n", cfg.RiskControl.MinConfidence))
+	sb.WriteString(fmt.Sprintf("- BTC/ETH leverage: %dx, altcoin leverage: %dx\n", cfg.RiskControl.BTCETHMaxLeverage, cfg.RiskControl.AltcoinMaxLeverage))
+	sb.WriteString(fmt.Sprintf("- BTC/ETH position ratio: %.2fx equity, altcoin ratio: %.2fx\n", cfg.RiskControl.BTCETHMaxPositionValueRatio, cfg.RiskControl.AltcoinMaxPositionValueRatio))
+	sb.WriteString(fmt.Sprintf("- max_positions: %d, min_risk_reward: %.1f\n", cfg.RiskControl.MaxPositions, cfg.RiskControl.MinRiskRewardRatio))
+	sb.WriteString(fmt.Sprintf("- binance_top_limit: %d (universe size fed to AI)\n", cfg.CoinSource.BinanceTopLimit))
+	sb.WriteString(fmt.Sprintf("- indicators: ema=%t macd=%t rsi=%t atr=%t boll=%t\n",
+		cfg.Indicators.EnableEMA, cfg.Indicators.EnableMACD, cfg.Indicators.EnableRSI, cfg.Indicators.EnableATR, cfg.Indicators.EnableBOLL))
 	sb.WriteString(fmt.Sprintf("- excluded_coins: %v\n", cfg.CoinSource.ExcludedCoins))
-	sb.WriteString(fmt.Sprintf("- custom_prompt length: %d chars (last 200 chars: %q)\n\n",
+	sb.WriteString(fmt.Sprintf("- custom_prompt: %d chars (last 200: %q)\n\n",
 		len(cfg.CustomPrompt), tailString(cfg.CustomPrompt, 200)))
 
-	sb.WriteString("# Read-only context (other config the trader runs with)\n\n")
-	sb.WriteString(fmt.Sprintf("- coin_source: %s, limit %d\n", cfg.CoinSource.SourceType, cfg.CoinSource.BinanceTopLimit))
-	sb.WriteString(fmt.Sprintf("- BTC/ETH leverage cap: %dx, altcoin: %dx\n", cfg.RiskControl.BTCETHMaxLeverage, cfg.RiskControl.AltcoinMaxLeverage))
-	sb.WriteString(fmt.Sprintf("- max_positions: %d, min_risk_reward: %.1f\n\n", cfg.RiskControl.MaxPositions, cfg.RiskControl.MinRiskRewardRatio))
+	sb.WriteString("# Structural config (read-only, not tunable here)\n\n")
+	sb.WriteString(fmt.Sprintf("- coin_source type: %s\n", cfg.CoinSource.SourceType))
+	sb.WriteString(fmt.Sprintf("- timeframes: primary=%s\n\n", cfg.Indicators.Klines.PrimaryTimeframe))
 
 	if stats != nil && stats.TotalTrades > 0 {
 		sb.WriteString("# Aggregate trade stats\n\n")
@@ -390,6 +537,26 @@ func sameStringSet(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+func clampInt(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
+func clampFloat(v, lo, hi float64) float64 {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
 }
 
 func tailString(s string, n int) string {

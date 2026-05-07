@@ -173,6 +173,118 @@ func TestMaybeReview_RespectsCycleSpacing(t *testing.T) {
 	}
 }
 
+func TestApplyBounded_LeverageClamps(t *testing.T) {
+	o := &StrategyOptimizer{}
+	cfg := &store.StrategyConfig{}
+	cfg.RiskControl.BTCETHMaxLeverage = 10
+	cfg.RiskControl.AltcoinMaxLeverage = 7
+
+	high := 100
+	low := 0
+	if !o.applyBounded(cfg, optimizerSuggestion{
+		BTCETHLeverage:  &high,
+		AltcoinLeverage: &low,
+	}) {
+		t.Fatalf("expected change")
+	}
+	if cfg.RiskControl.BTCETHMaxLeverage != 25 {
+		t.Fatalf("BTC/ETH leverage clamp got=%d want=25", cfg.RiskControl.BTCETHMaxLeverage)
+	}
+	if cfg.RiskControl.AltcoinMaxLeverage != 1 {
+		t.Fatalf("altcoin leverage clamp got=%d want=1", cfg.RiskControl.AltcoinMaxLeverage)
+	}
+}
+
+func TestApplyBounded_PositionRatioClamps(t *testing.T) {
+	o := &StrategyOptimizer{}
+	cfg := &store.StrategyConfig{}
+	r := 99.0
+	if !o.applyBounded(cfg, optimizerSuggestion{BTCETHPositionRatio: &r}) {
+		t.Fatalf("expected change")
+	}
+	if cfg.RiskControl.BTCETHMaxPositionValueRatio != 20 {
+		t.Fatalf("position ratio clamp got=%.2f want=20", cfg.RiskControl.BTCETHMaxPositionValueRatio)
+	}
+}
+
+func TestApplyBounded_MaxPositionsClamps(t *testing.T) {
+	o := &StrategyOptimizer{}
+	cfg := &store.StrategyConfig{}
+	cfg.RiskControl.MaxPositions = 3
+	hi := 50
+	if !o.applyBounded(cfg, optimizerSuggestion{MaxPositions: &hi}) {
+		t.Fatalf("expected change")
+	}
+	if cfg.RiskControl.MaxPositions != 10 {
+		t.Fatalf("max_positions clamp got=%d want=10", cfg.RiskControl.MaxPositions)
+	}
+}
+
+func TestApplyBounded_BinanceTopLimitClamps(t *testing.T) {
+	o := &StrategyOptimizer{}
+	cfg := &store.StrategyConfig{}
+	cfg.CoinSource.BinanceTopLimit = 10
+	hi := 999
+	if !o.applyBounded(cfg, optimizerSuggestion{BinanceTopLimit: &hi}) {
+		t.Fatalf("expected change")
+	}
+	if cfg.CoinSource.BinanceTopLimit != store.MaxCandidateCoins {
+		t.Fatalf("binance_top_limit clamp got=%d want=%d", cfg.CoinSource.BinanceTopLimit, store.MaxCandidateCoins)
+	}
+}
+
+func TestApplyBounded_IndicatorTogglesIndependent(t *testing.T) {
+	o := &StrategyOptimizer{}
+	cfg := &store.StrategyConfig{}
+	tr, fa := true, false
+
+	if !o.applyBounded(cfg, optimizerSuggestion{EnableEMA: &tr, EnableRSI: &tr}) {
+		t.Fatalf("expected change")
+	}
+	if !cfg.Indicators.EnableEMA || !cfg.Indicators.EnableRSI {
+		t.Fatalf("indicator flips not applied: %+v", cfg.Indicators)
+	}
+	// Flipping a single one back must be tracked even when others stay true.
+	if !o.applyBounded(cfg, optimizerSuggestion{EnableEMA: &fa}) {
+		t.Fatalf("expected change on partial flip-back")
+	}
+	if cfg.Indicators.EnableEMA || !cfg.Indicators.EnableRSI {
+		t.Fatalf("partial flip-back failed: %+v", cfg.Indicators)
+	}
+}
+
+func TestParseOptimizerSuggestion_AllNewFields(t *testing.T) {
+	raw := `{
+		"reasoning": "increase aggression",
+		"min_confidence": 80,
+		"btc_eth_max_leverage": 15,
+		"altcoin_max_leverage": 12,
+		"max_positions": 6,
+		"btc_eth_max_position_value_ratio": 8.0,
+		"altcoin_max_position_value_ratio": 4.5,
+		"min_risk_reward_ratio": 2.5,
+		"binance_top_limit": 20,
+		"enable_ema": true,
+		"enable_rsi": true
+	}`
+	got, err := parseOptimizerSuggestion(raw)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if got.BTCETHLeverage == nil || *got.BTCETHLeverage != 15 {
+		t.Fatalf("BTC/ETH leverage: %+v", got.BTCETHLeverage)
+	}
+	if got.MaxPositions == nil || *got.MaxPositions != 6 {
+		t.Fatalf("max_positions: %+v", got.MaxPositions)
+	}
+	if got.BinanceTopLimit == nil || *got.BinanceTopLimit != 20 {
+		t.Fatalf("binance_top_limit: %+v", got.BinanceTopLimit)
+	}
+	if got.EnableEMA == nil || !*got.EnableEMA {
+		t.Fatalf("enable_ema: %+v", got.EnableEMA)
+	}
+}
+
 func TestSummariseSuggestion(t *testing.T) {
 	v := 80
 	out := summariseSuggestion(optimizerSuggestion{

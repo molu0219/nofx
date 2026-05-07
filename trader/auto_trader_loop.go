@@ -516,6 +516,36 @@ func (at *AutoTrader) buildTradingContext() (*kernel.Context, error) {
 				})
 			}
 		}
+		// Reasoning trail: pull the last 5 cycles' chain-of-thought + decisions
+		// so the fresh-session AI gets compact memory of its own recent thinking
+		// without paying for a continuous Claude session. Truncate per-cycle to
+		// 300 chars to keep the extra prompt cost ~2k tokens.
+		recentDecisions, err := at.store.Decision().GetLatestRecords(at.id, 5)
+		if err != nil {
+			at.logWarnf("⚠️ Failed to load reasoning trail: %v", err)
+		} else {
+			for _, rec := range recentDecisions {
+				reasoning := rec.CoTTrace
+				if len(reasoning) > 300 {
+					reasoning = reasoning[:297] + "…"
+				}
+				actions := make([]string, 0, len(rec.Decisions))
+				for _, a := range rec.Decisions {
+					tail := ""
+					if a.Action == "open_long" || a.Action == "open_short" {
+						tail = fmt.Sprintf(" lev=%dx size=%.0f", a.Leverage, a.Quantity*a.Price)
+					}
+					actions = append(actions, a.Action+" "+a.Symbol+tail)
+				}
+				ctx.PastReasonings = append(ctx.PastReasonings, kernel.PastReasoning{
+					CycleNumber: rec.CycleNumber,
+					Timestamp:   rec.Timestamp,
+					Reasoning:   reasoning,
+					Actions:     actions,
+				})
+			}
+		}
+
 		// Get trading statistics for AI context
 		stats, err := at.store.Position().GetFullStats(at.id)
 		if err != nil {

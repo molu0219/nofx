@@ -248,6 +248,26 @@ func (e *StrategyEngine) BuildUserPrompt(ctx *Context) string {
 		ctx.Account.MarginUsedPct,
 		ctx.Account.PositionCount))
 
+	// Reasoning trail (option B memory): show what previous cycles thought +
+	// did so this fresh-session call can detect its own patterns ("I keep
+	// reopening this idea" / "every time I size up after a win it reverses").
+	// Most recent cycle first. Compact format on purpose — full CoT lives in
+	// the decision_records table for audit, this is just a memory hint.
+	if len(ctx.PastReasonings) > 0 {
+		sb.WriteString("## Recent Cycles' Reasoning Trail\n")
+		sb.WriteString("(your own past thinking — use to spot loops, double-downs, or convictions worth carrying)\n\n")
+		for _, pr := range ctx.PastReasonings {
+			sb.WriteString(fmt.Sprintf("• cycle #%d @ %s\n", pr.CycleNumber, pr.Timestamp.Format("01-02 15:04 UTC")))
+			if len(pr.Actions) > 0 {
+				sb.WriteString(fmt.Sprintf("  actions: %s\n", strings.Join(pr.Actions, "; ")))
+			}
+			if pr.Reasoning != "" {
+				sb.WriteString("  reasoning: " + pr.Reasoning + "\n")
+			}
+		}
+		sb.WriteString("\n")
+	}
+
 	// Recently completed orders (placed before positions to ensure visibility)
 	if len(ctx.RecentOrders) > 0 {
 		sb.WriteString("## Recent Completed Trades\n")

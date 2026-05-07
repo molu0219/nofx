@@ -88,6 +88,26 @@ type RecentOrder struct {
 	HoldDuration string  `json:"hold_duration"` // Hold duration, e.g. "2h30m"
 }
 
+// PastReasoning is a compact snapshot of a previous cycle's AI thinking that
+// gets folded back into the current cycle's user prompt. The optimizer chose
+// option B over per-trader continuous Claude sessions: each cycle still spins
+// up a fresh CLI invocation (predictable token cost, no state pollution
+// between cycles), but the new prompt section gives the model just enough
+// memory to notice patterns like "I keep revisiting this idea and it keeps
+// not working" without paying for a multi-turn conversation.
+type PastReasoning struct {
+	CycleNumber int       `json:"cycle_number"`
+	Timestamp   time.Time `json:"timestamp"`
+	// Reasoning is a truncated chain-of-thought (≤300 chars) so 5 cycles fits
+	// within ~2k extra tokens.
+	Reasoning string `json:"reasoning"`
+	// Actions summarises the decisions taken on that cycle, e.g.
+	// ["open_short BTCUSDT lev=10", "hold ETHUSDT"]. Same idea: short and
+	// scannable so the model can pick up "what I did" without re-reading
+	// every JSON field.
+	Actions []string `json:"actions"`
+}
+
 // Context trading context (complete information passed to AI)
 type Context struct {
 	CurrentTime        string                             `json:"current_time"`
@@ -99,6 +119,10 @@ type Context struct {
 	PromptVariant      string                             `json:"prompt_variant,omitempty"`
 	TradingStats       *TradingStats                      `json:"trading_stats,omitempty"`
 	RecentOrders       []RecentOrder                      `json:"recent_orders,omitempty"`
+	// PastReasonings is the last few cycles' compact reasoning trail so the
+	// fresh-session AI can detect its own patterns without a continuous
+	// conversation. Most recent cycle first.
+	PastReasonings []PastReasoning `json:"past_reasonings,omitempty"`
 	MarketDataMap      map[string]*market.Data            `json:"-"`
 	MultiTFMarket      map[string]map[string]*market.Data `json:"-"`
 	OITopDataMap       map[string]*OITopData              `json:"-"`
