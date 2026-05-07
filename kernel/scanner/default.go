@@ -2,8 +2,12 @@ package scanner
 
 import (
 	"context"
+	"os"
 	"sync"
 	"time"
+
+	"nofx/logger"
+	"nofx/mcp"
 )
 
 // defaultMgr is the process-wide scanner singleton consumed by trader engines
@@ -41,12 +45,39 @@ var pendingPositionsFn PositionsFunc
 
 // Default returns the singleton scanner, starting its background goroutine
 // on first access. Subsequent calls return the same instance.
+//
+// Scorer selection (NOFX_SCANNER_SCORER):
+//   - "rule"   (default) — RuleScorer; deterministic, free, fast.
+//   - "ai"     — AIScorer wrapping a claudecli AIClient, RuleScorer fallback.
+//                Sends a one-line-per-symbol summary of the universe and
+//                asks the model to pick top-50; the larger pool gives the
+//                hysteresis layer cushion when the model's picks shift.
+//
+// AI scoring is opt-in because the call adds 15-30s per scan and ~12k
+// tokens. For tight feedback loops the RuleScorer is plenty.
 func Default() *Scanner {
 	defaultMu.Lock()
 	defer defaultMu.Unlock()
 	if defaultMgr != nil {
 		return defaultMgr
 	}
+
+	rule := NewRuleScorer(ScoringWeights{})
+	scorer := Scorer(rule)
+	if os.Getenv("NOFX_SCANNER_SCORER") == "ai" {
+		client := mcp.NewAIClientByProvider("claudecli")
+		if client != nil {
+			scorer = &AIScorer{
+				Client:   client,
+				Top:      50, // larger than watchlist for hysteresis cushion
+				Fallback: rule,
+			}
+			logger.Infof("🔭 [scanner] using AI scorer (claudecli) with rule fallback")
+		} else {
+			logger.Warnf("🔭 [scanner] NOFX_SCANNER_SCORER=ai but claudecli client unavailable — falling back to rule scorer")
+		}
+	}
+
 	defaultMgr = New(Config{
 		Interval:       10 * time.Minute,
 		WatchlistSize:  30,
@@ -54,7 +85,7 @@ func Default() *Scanner {
 		MissThreshold:  2,
 		FetchTickers:   BinanceTickerFetcher(),
 		FetchFunding:   BinanceFundingFetcher(),
-		Scorer:         NewRuleScorer(ScoringWeights{}),
+		Scorer:         scorer,
 		GetOpenSymbols: pendingPositionsFn,
 	})
 	go func() {
