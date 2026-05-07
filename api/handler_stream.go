@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -30,6 +31,12 @@ const (
 // streamTickPayload is the per-event JSON the dashboard consumes. Mirrors what
 // /api/account + /api/positions return so the frontend can swap polling for
 // the stream without restructuring its state.
+//
+// Every numeric field the dashboard renders for "live" values must be on
+// here; the frontend cache patch picks them up directly without computing
+// derivations on its own. Anything we miss here stays at the stale SWR-poll
+// value until the next 15s refresh, which is what was making total_pnl
+// look frozen on the previous revision.
 type streamTickPayload struct {
 	TraderID         string                   `json:"trader_id"`
 	Timestamp        time.Time                `json:"timestamp"`
@@ -38,7 +45,10 @@ type streamTickPayload struct {
 	AvailableBalance float64                  `json:"available_balance"`
 	UnrealizedPnL    float64                  `json:"unrealized_pnl"`
 	MarginUsed       float64                  `json:"margin_used"`
+	MarginUsedPct    float64                  `json:"margin_used_pct"`
+	TotalPnL         float64                  `json:"total_pnl"`
 	TotalPnLPct      float64                  `json:"total_pnl_pct"`
+	PositionCount    int                      `json:"position_count"`
 	Positions        []map[string]interface{} `json:"positions"`
 }
 
@@ -92,7 +102,7 @@ func (s *Server) handleStreamTrader(c *gin.Context) {
 
 	// Send one initial snapshot so the client sees data without waiting for
 	// the first market tick.
-	if snap, err := buildTraderSnapshot(traderID, trader.GetInitialBalance(), trader.GetUnderlyingTrader()); err == nil {
+	if snap, err := buildTraderSnapshot(traderID, trader.GetInitialBalance(), trader); err == nil {
 		writeSSEEvent(c.Writer, flusher, "tick", snap)
 	}
 
@@ -125,7 +135,7 @@ func (s *Server) handleStreamTrader(c *gin.Context) {
 				continue
 			}
 			lastEmit = time.Now()
-			snap, err := buildTraderSnapshot(traderID, trader.GetInitialBalance(), trader.GetUnderlyingTrader())
+			snap, err := buildTraderSnapshot(traderID, trader.GetInitialBalance(), trader)
 			if err != nil {
 				continue
 			}
@@ -135,7 +145,7 @@ func (s *Server) handleStreamTrader(c *gin.Context) {
 
 		case <-heartbeat.C:
 			lastEmit = time.Now()
-			snap, err := buildTraderSnapshot(traderID, trader.GetInitialBalance(), trader.GetUnderlyingTrader())
+			snap, err := buildTraderSnapshot(traderID, trader.GetInitialBalance(), trader)
 			if err != nil {
 				continue
 			}
@@ -146,20 +156,23 @@ func (s *Server) handleStreamTrader(c *gin.Context) {
 	}
 }
 
-// snapshotSource is the minimal Trader-side surface buildTraderSnapshot needs.
-// Inlining the interface here keeps handler_stream from importing the trader
-// package (which would create a cycle: api → trader → store … → api).
+// snapshotSource is the AutoTrader-side surface buildTraderSnapshot needs.
+// We use the AutoTrader-level transforming methods (GetAccountInfo,
+// GetPositions) — NOT the underlying Trader interface — because those return
+// snake_case fields the dashboard already consumes via /api/account and
+// /api/positions. Mirroring the same transform lets the SSE payload drop
+// straight into the SWR cache without per-component shape coercion.
 type snapshotSource interface {
-	GetBalance() (map[string]interface{}, error)
+	GetAccountInfo() (map[string]interface{}, error)
 	GetPositions() ([]map[string]interface{}, error)
 }
 
 // buildTraderSnapshot pulls the current account + position state from the
-// trader and packages it for SSE delivery. The trader's own GetBalance /
-// GetPositions reach into the live mark-price cache, so the snapshot is
-// always sub-second-fresh on the paper exchange.
+// trader and packages it for SSE delivery. Underlying GetBalance /
+// GetPositions read the live mark-price cache, so the snapshot is always
+// sub-second-fresh on the paper exchange.
 func buildTraderSnapshot(traderID string, initialBalance float64, t snapshotSource) (streamTickPayload, error) {
-	bal, err := t.GetBalance()
+	acct, err := t.GetAccountInfo()
 	if err != nil {
 		return streamTickPayload{}, err
 	}
@@ -169,20 +182,28 @@ func buildTraderSnapshot(traderID string, initialBalance float64, t snapshotSour
 		positions = nil
 	}
 
-	wallet := readFloat(bal, "totalWalletBalance", "wallet_balance", "balance")
-	equity := readFloat(bal, "totalEquity", "total_equity")
-	if equity == 0 {
-		// Fallback when the trader didn't compute equity itself.
-		equity = wallet + readFloat(bal, "totalUnrealizedProfit", "unrealizedPnL")
-	}
-	available := readFloat(bal, "availableBalance", "available_balance")
-	unrealized := readFloat(bal, "totalUnrealizedProfit", "unrealizedPnL", "unrealized_pnl")
-	margin := readFloat(bal, "marginUsed", "margin_used")
-
-	pnlPct := 0.0
-	if initialBalance > 0 {
+	equity := readFloat(acct, "total_equity")
+	wallet := readFloat(acct, "wallet_balance")
+	available := readFloat(acct, "available_balance")
+	unrealized := readFloat(acct, "unrealized_profit")
+	margin := readFloat(acct, "margin_used")
+	marginPct := readFloat(acct, "margin_used_pct")
+	totalPnL := readFloat(acct, "total_pnl")
+	pnlPct := readFloat(acct, "total_pnl_pct")
+	if pnlPct == 0 && initialBalance > 0 {
 		pnlPct = ((equity - initialBalance) / initialBalance) * 100
 	}
+	if totalPnL == 0 && initialBalance > 0 {
+		totalPnL = equity - initialBalance
+	}
+
+	// Sort positions deterministically by opening notional (entry_price × qty)
+	// descending. Without this the dashboard list reshuffles on every tick
+	// because Go's map iteration randomises the underlying order — visually
+	// jarring and impossible to track which position is which.
+	sort.SliceStable(positions, func(i, j int) bool {
+		return openingNotional(positions[i]) > openingNotional(positions[j])
+	})
 
 	return streamTickPayload{
 		TraderID:         traderID,
@@ -192,9 +213,23 @@ func buildTraderSnapshot(traderID string, initialBalance float64, t snapshotSour
 		AvailableBalance: available,
 		UnrealizedPnL:    unrealized,
 		MarginUsed:       margin,
+		MarginUsedPct:    marginPct,
+		TotalPnL:         totalPnL,
 		TotalPnLPct:      pnlPct,
+		PositionCount:    len(positions),
 		Positions:        positions,
 	}, nil
+}
+
+// openingNotional pulls entry_price × quantity from a position record. Falls
+// back to 0 when fields are missing so the comparator stays well-defined.
+func openingNotional(pos map[string]interface{}) float64 {
+	entry, _ := pos["entry_price"].(float64)
+	qty, _ := pos["quantity"].(float64)
+	if qty < 0 {
+		qty = -qty
+	}
+	return entry * qty
 }
 
 // readFloat picks the first numeric value among the given keys.

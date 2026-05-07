@@ -14,7 +14,10 @@ interface StreamTickPayload {
   available_balance: number
   unrealized_pnl: number
   margin_used: number
+  margin_used_pct: number
+  total_pnl: number
   total_pnl_pct: number
+  position_count: number
   positions: Array<Record<string, unknown>>
 }
 
@@ -78,11 +81,14 @@ export function useTraderStream(
             (prev) => ({
               ...(prev || ({} as AccountInfo)),
               total_equity: payload.equity,
+              wallet_balance: payload.wallet_balance,
               available_balance: payload.available_balance,
-              total_unrealized_profit: payload.unrealized_pnl,
+              unrealized_profit: payload.unrealized_pnl,
+              total_pnl: payload.total_pnl,
               total_pnl_pct: payload.total_pnl_pct,
-              total_wallet_balance: payload.wallet_balance,
-              total_margin_used: payload.margin_used,
+              margin_used: payload.margin_used,
+              margin_used_pct: payload.margin_used_pct,
+              position_count: payload.position_count,
             }),
             { revalidate: false }
           )
