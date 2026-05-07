@@ -78,6 +78,11 @@ type pendingOrder struct {
 	createdAt    time.Time
 }
 
+// MaintenanceMarginRate is the maintenance-margin haircut applied when computing
+// liquidation prices. 0.4% mirrors Binance Futures USDT-M baseline; real venues
+// vary by symbol and tier — V1 uses a single rate for simplicity.
+const MaintenanceMarginRate = 0.004
+
 // Trader is the in-memory virtual exchange.
 type Trader struct {
 	mu sync.RWMutex
@@ -88,11 +93,12 @@ type Trader struct {
 	leverageBySym map[string]int
 
 	// Mutable state.
-	balance   float64               // available wallet balance (USDT)
-	positions map[string]*Position  // by symbol
-	orders    map[string]*pendingOrder
-	closed    []types.ClosedPnLRecord
-	orderSeq  uint64
+	balance       float64                  // wallet balance (USDT). Only fees, realized PnL, and liquidation losses move this.
+	positions     map[string]*Position     // by symbol
+	orders        map[string]*pendingOrder // pending stop-loss / take-profit / limit orders
+	closed        []types.ClosedPnLRecord
+	orderSeq      uint64
+	isCrossMargin bool // false = isolated (V1 default; liquidation math assumes isolated)
 }
 
 // Config is the paper trader configuration.
@@ -141,10 +147,12 @@ func (t *Trader) nextOrderID(prefix string) string {
 // ---------------------------------------------------------------------------
 
 // GetBalance returns the wallet balance and aggregate equity in the same shape
-// callers expect (matches the multi-key fallback in auto_trader.go).
+// callers expect (matches the multi-key fallback in auto_trader.go). Liquidation
+// settlement runs first so a freshly-blown position is reflected immediately.
 func (t *Trader) GetBalance() (map[string]interface{}, error) {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.settleLiquidationsLocked()
 
 	unrealized := 0.0
 	margin := 0.0
@@ -170,9 +178,11 @@ func (t *Trader) GetBalance() (map[string]interface{}, error) {
 }
 
 // GetPositions returns all open positions in the Binance-shaped map slice.
+// Liquidation settlement runs first so blown positions disappear from the result.
 func (t *Trader) GetPositions() ([]map[string]interface{}, error) {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.settleLiquidationsLocked()
 
 	out := make([]map[string]interface{}, 0, len(t.positions))
 	for _, p := range t.positions {
@@ -192,7 +202,7 @@ func (t *Trader) GetPositions() ([]map[string]interface{}, error) {
 			"markPrice":        mark,
 			"unRealizedProfit": unrealizedPnL(p, mark),
 			"leverage":         float64(p.Leverage),
-			"liquidationPrice": estimatedLiquidationPrice(p),
+			"liquidationPrice": liquidationPrice(p),
 			"side":             p.Side,
 		})
 	}
@@ -224,6 +234,23 @@ func (t *Trader) openPosition(symbol, side string, quantity float64, leverage in
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
+	// Settle any liquidations against the latest tick *before* the margin check
+	// so a freshly-blown position frees its margin.
+	t.settleLiquidationsLocked()
+
+	notional := quantity * price
+	fee := notional * (t.feeBps / 10000.0)
+	newMargin := notional / float64(leverage)
+
+	// [CONTRACT] Margin lock — reject if the wallet can't cover the new
+	// initial margin plus fees on top of already-locked margin.
+	available := t.balance - t.totalMarginLockedLocked()
+	if newMargin+fee > available {
+		return nil, fmt.Errorf(
+			"paper: insufficient margin for %s %s: need %.2f (margin %.2f + fee %.2f), available %.2f",
+			side, symbol, newMargin+fee, newMargin, fee, available)
+	}
+
 	if existing, ok := t.positions[symbol]; ok {
 		if existing.Side != side {
 			return nil, fmt.Errorf("paper: cannot open %s on %s while a %s position is open (V1 = no hedge mode)", side, symbol, existing.Side)
@@ -245,8 +272,6 @@ func (t *Trader) openPosition(symbol, side string, quantity float64, leverage in
 	}
 
 	// Charge taker fee against balance.
-	notional := quantity * price
-	fee := notional * (t.feeBps / 10000.0)
 	t.balance -= fee
 
 	id := t.nextOrderID("OPEN")
@@ -349,8 +374,15 @@ func (t *Trader) SetLeverage(symbol string, leverage int) error {
 	return nil
 }
 
-// SetMarginMode is a no-op (paper has no margin mode distinction).
-func (t *Trader) SetMarginMode(symbol string, isCrossMargin bool) error { return nil }
+// SetMarginMode records cross vs isolated. V1 always uses isolated math for
+// liquidation price; cross is stored for display/parity but does not (yet) widen
+// the liquidation buffer using account-wide equity.
+func (t *Trader) SetMarginMode(symbol string, isCrossMargin bool) error {
+	t.mu.Lock()
+	t.isCrossMargin = isCrossMargin
+	t.mu.Unlock()
+	return nil
+}
 
 // GetMarketPrice returns the current mark price for a symbol.
 func (t *Trader) GetMarketPrice(symbol string) (float64, error) {
@@ -571,7 +603,7 @@ func realizedPnL(p *Position, exit float64, qty float64) float64 {
 	return (p.EntryPrice - exit) * qty
 }
 
-// positionMargin estimates margin locked by a position — notional / leverage.
+// positionMargin returns the initial margin locked by a position — notional / leverage.
 func positionMargin(p *Position) float64 {
 	if p == nil || p.Leverage <= 0 {
 		return 0
@@ -579,18 +611,93 @@ func positionMargin(p *Position) float64 {
 	return (p.EntryPrice * p.Quantity) / float64(p.Leverage)
 }
 
-// estimatedLiquidationPrice gives a rough isolated-margin liquidation price.
-// Long: entry * (1 - 1/leverage). Short: entry * (1 + 1/leverage).
-// Real exchanges use mark-price + maintenance margin; this is intentionally
-// approximate and only used for display fields in GetPositions.
-func estimatedLiquidationPrice(p *Position) float64 {
+// liquidationPrice returns the isolated-margin liquidation price for a perp
+// position, accounting for the maintenance-margin haircut. The long/short
+// formulas mirror what real linear-USDT venues publish:
+//
+//	long  liq = entry * (1 - 1/leverage + maintenance_rate)
+//	short liq = entry * (1 + 1/leverage - maintenance_rate)
+//
+// V1 ignores funding accrual and tier-based maintenance margin.
+func liquidationPrice(p *Position) float64 {
 	if p == nil || p.Leverage <= 0 {
 		return 0
 	}
-	bumper := 1.0 / float64(p.Leverage)
+	imBuffer := 1.0 / float64(p.Leverage)
 	if p.Side == "long" {
-		return p.EntryPrice * (1 - bumper)
+		return p.EntryPrice * (1 - imBuffer + MaintenanceMarginRate)
 	}
-	return p.EntryPrice * (1 + bumper)
+	return p.EntryPrice * (1 + imBuffer - MaintenanceMarginRate)
+}
+
+// isLiquidated reports whether a position is at or beyond its liquidation price
+// at the given mark.
+func isLiquidated(p *Position, mark float64) bool {
+	if p == nil || p.Quantity == 0 {
+		return false
+	}
+	liq := liquidationPrice(p)
+	if p.Side == "long" {
+		return mark <= liq
+	}
+	return mark >= liq
+}
+
+// totalMarginLockedLocked sums initial margin across all open positions.
+// Caller MUST hold t.mu (read or write).
+func (t *Trader) totalMarginLockedLocked() float64 {
+	sum := 0.0
+	for _, p := range t.positions {
+		sum += positionMargin(p)
+	}
+	return sum
+}
+
+// settleLiquidationsLocked force-closes any position whose mark price has
+// crossed its liquidation level. The full initial margin is written off (no
+// "remainder returned to wallet" — V1 simplification consistent with isolated
+// liquidation losing the entire margin). Caller MUST hold t.mu (write).
+func (t *Trader) settleLiquidationsLocked() {
+	for sym, p := range t.positions {
+		mark, err := t.getMarkPrice(sym)
+		if err != nil {
+			continue // can't decide without a price; leave for next tick
+		}
+		if !isLiquidated(p, mark) {
+			continue
+		}
+		liq := liquidationPrice(p)
+		margin := positionMargin(p)
+
+		// Realized loss = -margin. Wallet absorbs that loss directly.
+		t.balance -= margin
+
+		rec := types.ClosedPnLRecord{
+			Symbol:      sym,
+			Side:        p.Side,
+			EntryPrice:  p.EntryPrice,
+			ExitPrice:   liq,
+			Quantity:    p.Quantity,
+			RealizedPnL: -margin,
+			Fee:         0,
+			Leverage:    p.Leverage,
+			EntryTime:   p.OpenedAt,
+			ExitTime:    time.Now().UTC(),
+			OrderID:     t.nextOrderID("LIQ"),
+			CloseType:   "liquidation",
+			ExchangeID:  "paper",
+		}
+		t.closed = append(t.closed, rec)
+
+		for id, o := range t.orders {
+			if o.symbol == sym {
+				delete(t.orders, id)
+			}
+		}
+		delete(t.positions, sym)
+
+		logger.Infof("📄 [paper] LIQUIDATED %s %s qty=%.6f mark=%.4f liq=%.4f loss=%.4f balance=%.2f",
+			strings.ToUpper(p.Side), sym, p.Quantity, mark, liq, margin, t.balance)
+	}
 }
 

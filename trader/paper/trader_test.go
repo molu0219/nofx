@@ -220,6 +220,103 @@ func TestGetClosedPnL_TimeFilter(t *testing.T) {
 	}
 }
 
+// ─── Contract-specific behaviour: margin lock + liquidation ───────────────
+
+func TestOpen_RejectsWhenMarginExceedsAvailable(t *testing.T) {
+	tr, _ := newPaperWith(t, 1_000, map[string]float64{"BTCUSDT": 50_000})
+	// 0.05 BTC notional = 2500 USDT; at 1x leverage that's 2500 margin > 1000 wallet.
+	if _, err := tr.OpenLong("BTCUSDT", 0.05, 1); err == nil {
+		t.Fatalf("expected margin rejection when notional exceeds wallet")
+	}
+	// Same notional at 5x leverage → margin 500 → fits in 1000.
+	if _, err := tr.OpenLong("BTCUSDT", 0.05, 5); err != nil {
+		t.Fatalf("OpenLong with leverage that fits: %v", err)
+	}
+}
+
+func TestOpen_RejectsAfterPartialMarginLocked(t *testing.T) {
+	tr, _ := newPaperWith(t, 1_000, map[string]float64{"BTCUSDT": 50_000, "ETHUSDT": 1_000})
+	// First open: 0.04 BTC * 50k / 5x = 400 margin; 600 still available.
+	if _, err := tr.OpenLong("BTCUSDT", 0.04, 5); err != nil {
+		t.Fatalf("OpenLong#1: %v", err)
+	}
+	// Second open: 1 ETH * 1k / 1x = 1000 margin; only 600 available → reject.
+	if _, err := tr.OpenLong("ETHUSDT", 1, 1); err == nil {
+		t.Fatalf("expected rejection when stacked margin exceeds wallet")
+	}
+	// Smaller second open inside remaining headroom should pass.
+	if _, err := tr.OpenLong("ETHUSDT", 0.5, 1); err != nil {
+		t.Fatalf("OpenLong#2 within headroom: %v", err)
+	}
+}
+
+func TestLiquidation_LongTriggersOnDownCross(t *testing.T) {
+	tr, mp := newPaperWith(t, 1_000, map[string]float64{"BTCUSDT": 100})
+	// 1 BTC at 100 with 5x lev → margin 20, liq ≈ 100 * (1 - 1/5 + 0.004) = 80.4
+	if _, err := tr.OpenLong("BTCUSDT", 1, 5); err != nil {
+		t.Fatalf("OpenLong: %v", err)
+	}
+	mp.set("BTCUSDT", 80) // pierces liq
+
+	pos, _ := tr.GetPositions()
+	if len(pos) != 0 {
+		t.Fatalf("expected position liquidated, got %d remaining", len(pos))
+	}
+	// Wallet should drop by margin (20).
+	bal, _ := tr.GetBalance()
+	if got, _ := bal["totalWalletBalance"].(float64); got != 980 {
+		t.Fatalf("balance after liquidation got=%.4f want=980.00", got)
+	}
+	// Liquidation should appear in closed records with CloseType=liquidation.
+	closed, _ := tr.GetClosedPnL(time.Time{}, 10)
+	if len(closed) != 1 || closed[0].CloseType != "liquidation" {
+		t.Fatalf("expected one liquidation record, got %+v", closed)
+	}
+	if closed[0].RealizedPnL != -20 {
+		t.Fatalf("liquidation realized got=%.4f want=-20", closed[0].RealizedPnL)
+	}
+}
+
+func TestLiquidation_ShortTriggersOnUpCross(t *testing.T) {
+	tr, mp := newPaperWith(t, 1_000, map[string]float64{"ETHUSDT": 100})
+	// 1 ETH short at 100, 5x → margin 20, liq ≈ 100 * (1 + 1/5 - 0.004) = 119.6
+	if _, err := tr.OpenShort("ETHUSDT", 1, 5); err != nil {
+		t.Fatalf("OpenShort: %v", err)
+	}
+	mp.set("ETHUSDT", 120)
+	pos, _ := tr.GetPositions()
+	if len(pos) != 0 {
+		t.Fatalf("expected liquidation, got %d positions", len(pos))
+	}
+	bal, _ := tr.GetBalance()
+	if got, _ := bal["totalWalletBalance"].(float64); got != 980 {
+		t.Fatalf("balance after liq got=%.4f want=980", got)
+	}
+}
+
+func TestLiquidation_DoesNotTriggerInBuffer(t *testing.T) {
+	tr, mp := newPaperWith(t, 1_000, map[string]float64{"BTCUSDT": 100})
+	// liq ≈ 80.4 at 5x. Drop to 81 — should NOT liquidate.
+	if _, err := tr.OpenLong("BTCUSDT", 1, 5); err != nil {
+		t.Fatalf("OpenLong: %v", err)
+	}
+	mp.set("BTCUSDT", 81)
+	pos, _ := tr.GetPositions()
+	if len(pos) != 1 {
+		t.Fatalf("position should survive 81 vs liq 80.4, got liquidated")
+	}
+}
+
+func TestSetMarginMode_StoresFlag(t *testing.T) {
+	tr, _ := newPaperWith(t, 1_000, map[string]float64{"BTCUSDT": 100})
+	if err := tr.SetMarginMode("BTCUSDT", true); err != nil {
+		t.Fatalf("SetMarginMode: %v", err)
+	}
+	if !tr.isCrossMargin {
+		t.Fatalf("isCrossMargin not stored")
+	}
+}
+
 func TestFee_AppliedOnOpenAndClose(t *testing.T) {
 	mp := &fixedMarkPrice{price: map[string]float64{"BTCUSDT": 1_000}}
 	tr, err := New(Config{InitialBalance: 10_000, FeeBps: 10, MarkPriceFunc: mp.get}) // 10 bps = 0.10%
