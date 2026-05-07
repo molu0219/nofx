@@ -10,9 +10,16 @@ import (
 	"gorm.io/gorm"
 )
 
-// Hard limits to prevent token explosion in AI requests
+// Hard limits to prevent token explosion in AI requests.
+//
+// MaxCandidateCoins=30 keeps the user-prompt within ~120k tokens for the
+// default 3-timeframe × 20-kline shape, leaving Claude Opus 4.x's 200k
+// window enough headroom for system prompt + reasoning. Beyond this the
+// per-cycle estimator in kernel/engine_analysis.go will start logging
+// warnings and eventually reject. Don't raise without re-running token
+// math against the realistic per-coin payload.
 const (
-	MaxCandidateCoins = 10
+	MaxCandidateCoins = 30
 	MaxPositions      = 3
 	MaxTimeframes     = 4
 	MinKlineCount     = 10
