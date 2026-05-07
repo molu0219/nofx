@@ -417,12 +417,19 @@ func (t *Trader) GetBalance() (map[string]interface{}, error) {
 		margin += positionMargin(p)
 	}
 	equity := t.balance + unrealized
+	// Two key flavours are emitted on purpose: the Binance-style
+	// camelCase keys (totalWalletBalance, totalUnrealizedProfit) are what
+	// auto_trader_decision.go actually reads, while the snake_case ones
+	// (total_equity) are part of the multi-key fallback in auto_trader.go.
+	// Keeping both means callers don't need to special-case paper.
 	out := map[string]interface{}{
-		"totalWalletBalance": t.balance,
-		"total_equity":       equity,
-		"availableBalance":   t.balance - margin,
-		"unrealizedPnL":      unrealized,
-		"marginUsed":         margin,
+		"totalWalletBalance":    t.balance,
+		"totalEquity":           equity,
+		"total_equity":          equity,
+		"availableBalance":      t.balance - margin,
+		"totalUnrealizedProfit": unrealized,
+		"unrealizedPnL":         unrealized, // legacy key kept for callers that read it
+		"marginUsed":            margin,
 	}
 	return out, nil
 }
