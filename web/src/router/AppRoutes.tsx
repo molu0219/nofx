@@ -27,6 +27,7 @@ import { SettingsPage } from '../pages/SettingsPage'
 import { StrategyMarketPage } from '../pages/StrategyMarketPage'
 import { StrategyStudioPage } from '../pages/StrategyStudioPage'
 import { TraderDashboardPage } from '../pages/TraderDashboardPage'
+import { useTraderStream } from '../hooks/useTraderStream'
 import { useAuth } from '../contexts/AuthContext'
 import { useLanguage } from '../contexts/LanguageContext'
 import { useSystemConfig } from '../hooks/useSystemConfig'
@@ -375,6 +376,16 @@ function DashboardRoute() {
       setLastUpdate(new Date().toLocaleTimeString())
     }
   }, [account])
+
+  // Real-time push from backend SSE: every Bybit tick patches the account +
+  // positions cache so the dashboard re-renders ~7-10 fps without polling.
+  // SWR's 15s poll above stays as a fallback for connection blips.
+  useTraderStream(
+    selectedTraderId,
+    typeof window !== 'undefined'
+      ? window.localStorage.getItem('auth_token')
+      : null
+  )
 
   const selectedTrader = traders?.find(
     (trader) => trader.trader_id === selectedTraderId

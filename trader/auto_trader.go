@@ -682,6 +682,12 @@ func (at *AutoTrader) Stop() {
 }
 
 // GetID gets trader ID
+// GetInitialBalance returns the configured starting balance, used by the SSE
+// stream and elsewhere to compute total P&L percentages.
+func (at *AutoTrader) GetInitialBalance() float64 {
+	return at.initialBalance
+}
+
 func (at *AutoTrader) GetID() string {
 	return at.id
 }

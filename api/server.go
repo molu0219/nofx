@@ -85,6 +85,10 @@ func (s *Server) setupRoutes() {
 		// System supported models and exchanges (no authentication required)
 		s.route(api, "GET", "/supported-models", "List supported AI model providers", s.handleGetSupportedModels)
 		s.route(api, "GET", "/supported-exchanges", "List supported exchange types", s.handleGetSupportedExchanges)
+		// SSE: registered on the public group because EventSource cannot send
+		// custom headers; the handler validates the JWT supplied via
+		// ?token=<jwt> (or Authorization header when proxied).
+		s.route(api, "GET", "/stream/trader/:id", "SSE stream of equity + positions for a trader (auth via ?token= or Authorization header)", s.handleStreamTrader)
 
 		// System config (no authentication required, for frontend to determine admin mode/registration status)
 		s.route(api, "GET", "/config", "Get system configuration", s.handleGetSystemConfig)
