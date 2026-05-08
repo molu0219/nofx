@@ -122,85 +122,193 @@ func (a *AIScorer) Rank(entries []UniverseEntry) []string {
 	return out
 }
 
-// aiScorerSystemPrompt explains the task and the strict output contract.
-//
-// The "richer fields" (OI, OI deltas, range_pos) appear only when the
-// scanner is configured with an Enricher and the row survived the
-// prefilter. Most rows will lack them — the prompt doesn't promise they're
-// present on every line, only that they appear when available.
-const aiScorerSystemPrompt = `You are a market scanner picking the most interesting USDT-margined perpetual futures for aggressive momentum trading right now.
+// aiScorerSystemPrompt v2 — assumes every row reaching the model has been
+// fully enriched (OI history, kline-derived MACD/RSI/ATR on 1h + 4h,
+// top-trader L/S ratio). Universe is now ~100 candidates not 561; per-row
+// information density is much higher, AI throughput much lower.
+const aiScorerSystemPrompt = `You are a market scanner picking the most interesting USDT-margined perpetual futures for aggressive momentum trading targeting 10% daily ROI on compound growth.
 
-Input: a universe of every Binance USDT-M perp with these per-symbol fields:
-- price
-- 10-minute, 30-minute, 1-hour, 24-hour percent price changes
-- 24h quote volume in USDT
-- last published funding rate (decimal; 0.0001 = 0.01% per 8h)
+Input: per-coin block with these fields, all from the last 24h (1h-period series) plus 4h-timeframe context:
 
-Some rows additionally carry:
-- open interest (in base coin units) and 10-minute / 1-hour OI percent change
-- range_pos (0..1, where the price sits inside the 24h high/low band)
+  Header:    price, vol(24h), Δ10m / Δ30m / Δ1h / Δ24h, range_pos (0..1 inside 24h high/low band), funding rate
+  OI:        latest, 24-point hourly history, Δ1h / Δ4h / Δ24h percent change
+  1h indicators: MACD line, RSI(14), ATR(14), recent OHLC tail (last 6 candles)
+  4h indicators: MACD line, RSI(14), ATR(14), recent OHLC tail (last 6 candles)
+  L/S:       top-trader position long/short ratio, latest + 24h series
+  Bypass:    "(bypass)" tag = made the candidate set on a |Δ1h| > 10% rule, not on volume
 
-These richer rows came through a more expensive enrichment pass, so when
-present they're the strongest signal you have — use them.
+Pick the N most interesting symbols. "Interesting" means high probability of a clean directional move within the next 1-4 hours, not just movement that already happened.
 
-Pick the N most interesting tickers for a trader pursuing 10% daily ROI on perp momentum.
+Strong signals (any combination wins):
+- Aligned momentum across timeframes: 1h MACD turning positive, 4h MACD already positive, 4h RSI rising through 50 → real continuation setup.
+- OI confirms direction: rising price + rising OI = new money entering; rising price + falling OI = short cover (fades). Same logic mirrored for shorts.
+- Range breakout with conviction: range_pos > 0.95 with Δ24h > +5%, OI rising, funding still neutral = early breakout, not late.
+- L/S rotation: top-trader L/S ratio rising on a coin showing +ve momentum = whales adding longs. Falling L/S on a downtrend = whales pressing shorts.
+- Funding dislocation: funding > +0.05% per 8h = crowded longs (pullback risk); funding < -0.03% = squeeze-prone (mean-revert candidate).
+- Bypass tags: a coin without volume backing but big Δ1h is the riskiest, highest-edge bucket — only pick if multiple confirmations align.
 
-What "interesting" means:
-- Strong recent momentum (large positive |Δ10m| / |Δ30m| / |Δ1h|) with volume conviction (high quote volume confirms it isn't a thin-book wick).
-- Funding rate dislocations (e.g. extreme positive funding while price climbs = crowded longs at risk; extreme negative = squeeze-prone).
-- OI confirms momentum: rising price + rising OI = new money entering (real trend); rising price + falling OI = short cover (often fades). The opposite for downtrends.
-- Range position: range_pos near 0.95+ with strong Δ24h = breakout candidate; near 0.05 with strong negative Δ24h = breakdown candidate; mid-range with high momentum = continuation through resistance.
-- Recent breakouts of multi-day ranges (use 24h % alongside short-window deltas to spot continuation).
-- AVOID stablecoin pairs (USDCUSDT, USDPUSDT, etc — by definition zero momentum).
-- AVOID extreme low volume (< $5M / 24h) — too easy to manipulate.
+Hard avoids:
+- Stablecoin pairs (USDCUSDT, USDPUSDT, etc — zero by construction).
+- Coins with degenerate indicators (ATR ≈ 0 = not moving, RSI exactly 50 from no data).
+- Late-cycle exhaustion: RSI > 80 on both 1h AND 4h with funding > +0.1% = roof.
 
 Strict output contract:
-- Exactly N comma-separated symbols, in your preferred order (best first).
-- USDT-suffixed (e.g. "BTCUSDT").
-- No commentary, no markdown, no fences. The first character of your response must be a symbol.
+- Exactly N comma-separated symbols, your preferred order (best first).
+- USDT-suffixed.
+- No commentary, no markdown, no code fences. First character must be a symbol.
 
-If you cannot meaningfully rank N candidates from the data, return as many as you can. The framework treats fewer-than-half results as a failure and falls back to a rule-based scorer; reaching for filler hurts you.`
+If you can't ground N picks in the data, return fewer. The framework treats fewer-than-half as failure and falls back to a deterministic rule scorer — so filler hurts you.`
 
-// buildAIScorerUserPrompt formats the universe in a compact one-line-per-symbol
-// shape. Each line is ~80-100 chars; 561 entries → ~48 KB → ~12k tokens.
+// buildAIScorerUserPrompt formats every enriched candidate into a structured
+// per-coin block. Layout aims for ~600-800 chars/coin; 100 coins → ~70 KB →
+// ~17.5k tokens. Symbols arrive in volume-desc order so big names anchor
+// the model's reading without burying small movers (which the bypass tag
+// is meant to surface).
 func buildAIScorerUserPrompt(entries []UniverseEntry, top int) string {
-	// Pre-sort by 24h volume desc so the prompt order matches what a human
-	// scanner usually reads first. Also helps the model anchor on big names
-	// without missing small movers (it sees the whole list anyway).
 	sorted := append([]UniverseEntry(nil), entries...)
 	sort.Slice(sorted, func(i, j int) bool {
 		return sorted[i].QuoteVolume24h > sorted[j].QuoteVolume24h
 	})
 
 	var sb strings.Builder
-	sb.Grow(len(sorted) * 120)
-	sb.WriteString(fmt.Sprintf("Pick the top %d most interesting USDT-M perps. Output exactly %d comma-separated symbols.\n\n", top, top))
-	sb.WriteString("Universe (sorted by 24h volume desc):\n")
+	sb.Grow(len(sorted) * 700)
+	sb.WriteString(fmt.Sprintf(
+		"Pick the top %d most interesting USDT-M perps from the %d candidates below. Output exactly %d comma-separated symbols.\n\n",
+		top, len(sorted), top,
+	))
 	for _, e := range sorted {
-		sb.WriteString(fmt.Sprintf(
-			"%s  $%s  Δ10m=%+0.2f%%  Δ30m=%+0.2f%%  Δ1h=%+0.2f%%  Δ24h=%+0.2f%%  vol=$%s  fund=%+0.4f%%",
-			padSymbol(e.Symbol),
-			formatPrice(e.Price),
-			e.PriceChange10m, e.PriceChange30m, e.PriceChange1h, e.PriceChange24h,
-			formatVolume(e.QuoteVolume24h),
-			e.FundingRate*100,
-		))
-		// Append enrichment fields only when present. Zero OI = not enriched
-		// (Enricher couldn't fetch this symbol or it's outside the prefilter
-		// top K). Keeping enriched rows visually distinct helps the model
-		// weight them more heavily.
-		if e.OpenInterest > 0 {
-			sb.WriteString(fmt.Sprintf(
-				"  oi=%s  oi10m=%+0.2f%%  oi1h=%+0.2f%%  rangepos=%0.2f",
-				formatOI(e.OpenInterest, e.Price),
-				e.OIChg10m, e.OIChg1h,
-				e.RangePos(),
-			))
-		}
-		sb.WriteByte('\n')
+		sb.WriteString(formatEntryBlock(e))
+		sb.WriteString("\n")
 	}
-	sb.WriteString(fmt.Sprintf("\nOutput %d comma-separated symbols now (best first):", top))
+	sb.WriteString(fmt.Sprintf("Output %d comma-separated symbols now (best first):", top))
 	return sb.String()
+}
+
+// formatEntryBlock renders one candidate as a labelled multi-line block.
+// Order chosen so the model can scan top-down: identifier → price action
+// → OI → 1h/4h technicals → L/S. Empty / missing sections are skipped so
+// the model doesn't confuse "no data" with "data says zero".
+func formatEntryBlock(e UniverseEntry) string {
+	var sb strings.Builder
+	tag := ""
+	if e.ByPass {
+		tag = " (bypass)"
+	}
+	sb.WriteString(fmt.Sprintf("=== %s%s ===\n", e.Symbol, tag))
+	sb.WriteString(fmt.Sprintf(
+		"Price=$%s  Vol24h=$%s  Range=%0.2f  Δ10m=%+0.2f%%  Δ30m=%+0.2f%%  Δ1h=%+0.2f%%  Δ24h=%+0.2f%%  Fund=%+0.4f%%\n",
+		formatPrice(e.Price),
+		formatVolume(e.QuoteVolume24h),
+		e.RangePos(),
+		e.PriceChange10m, e.PriceChange30m, e.PriceChange1h, e.PriceChange24h,
+		e.FundingRate*100,
+	))
+
+	if e.OpenInterest > 0 {
+		sb.WriteString(fmt.Sprintf(
+			"OI=%s  Δ1h=%+0.2f%%  Δ4h=%+0.2f%%  Δ24h=%+0.2f%%",
+			formatOI(e.OpenInterest, e.Price),
+			e.OIChg1h, e.OIChg4h, e.OIChg24h,
+		))
+		if len(e.OIHistory) >= 4 {
+			// Compress to 6 evenly-spaced samples — gives the model "shape"
+			// without flooding the prompt with 24 floats.
+			sb.WriteString("  hist=")
+			sb.WriteString(compressFloats(e.OIHistory, 6))
+		}
+		sb.WriteString("\n")
+	}
+
+	if len(e.Klines1h) >= 26 {
+		sb.WriteString(fmt.Sprintf(
+			"1h: MACD=%.4f  RSI14=%0.1f  ATR14=%.4f  ohlc(last6)=%s\n",
+			e.MACD1h, e.RSI1h, e.ATR1h,
+			compressOHLC(e.Klines1h, 6),
+		))
+	}
+	if len(e.Klines4h) >= 26 {
+		sb.WriteString(fmt.Sprintf(
+			"4h: MACD=%.4f  RSI14=%0.1f  ATR14=%.4f  ohlc(last6)=%s\n",
+			e.MACD4h, e.RSI4h, e.ATR4h,
+			compressOHLC(e.Klines4h, 6),
+		))
+	}
+
+	if len(e.LongShortHistory) >= 2 {
+		series := make([]float64, 0, len(e.LongShortHistory))
+		for _, r := range e.LongShortHistory {
+			series = append(series, r.Ratio)
+		}
+		sb.WriteString(fmt.Sprintf(
+			"L/S(top)=%0.3f  hist=%s\n",
+			e.LongShortLatest,
+			compressFloats(series, 6),
+		))
+	}
+
+	return sb.String()
+}
+
+// compressFloats picks `n` evenly-spaced samples from values and renders
+// them as comma-separated. Always includes first + last so the model can
+// read direction. Returns an empty string when input is too short.
+func compressFloats(values []float64, n int) string {
+	if len(values) == 0 || n <= 0 {
+		return ""
+	}
+	if len(values) <= n {
+		out := make([]string, len(values))
+		for i, v := range values {
+			out[i] = trimFloat(v)
+		}
+		return strings.Join(out, ",")
+	}
+	out := make([]string, 0, n)
+	step := float64(len(values)-1) / float64(n-1)
+	for i := 0; i < n; i++ {
+		idx := int(float64(i) * step)
+		if idx >= len(values) {
+			idx = len(values) - 1
+		}
+		out = append(out, trimFloat(values[idx]))
+	}
+	return strings.Join(out, ",")
+}
+
+// compressOHLC takes the last `n` candles and renders them as O/H/L/C
+// quadruplets joined by " | ". Volume omitted to keep the prompt compact —
+// the header already carries 24h vol, and per-candle volume rarely changes
+// the read.
+func compressOHLC(klines []Kline, n int) string {
+	if len(klines) == 0 || n <= 0 {
+		return ""
+	}
+	if len(klines) > n {
+		klines = klines[len(klines)-n:]
+	}
+	parts := make([]string, 0, len(klines))
+	for _, k := range klines {
+		parts = append(parts, fmt.Sprintf(
+			"%s/%s/%s/%s",
+			trimFloat(k.Open), trimFloat(k.High), trimFloat(k.Low), trimFloat(k.Close),
+		))
+	}
+	return strings.Join(parts, " | ")
+}
+
+// trimFloat formats a float without trailing zeros, picking precision based
+// on magnitude (matches formatPrice but avoids the leading "$").
+func trimFloat(v float64) string {
+	switch {
+	case v >= 1000:
+		return fmt.Sprintf("%.0f", v)
+	case v >= 1:
+		return fmt.Sprintf("%.2f", v)
+	case v >= 0.01:
+		return fmt.Sprintf("%.4f", v)
+	default:
+		return fmt.Sprintf("%.6f", v)
+	}
 }
 
 // formatOI reduces base-coin OI × current price to a $B/$M/$K notional, the

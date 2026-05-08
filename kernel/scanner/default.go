@@ -65,6 +65,7 @@ func Default() *Scanner {
 	rule := NewRuleScorer(ScoringWeights{})
 	scorer := Scorer(rule)
 	var enricher Enricher
+	var prefilter Scorer
 	if os.Getenv("NOFX_SCANNER_SCORER") == "ai" {
 		client := mcp.NewAIClientByProvider("claudecli")
 		if client != nil {
@@ -73,29 +74,41 @@ func Default() *Scanner {
 				Top:      50, // larger than watchlist for hysteresis cushion
 				Fallback: rule,
 			}
-			// Enrichment is paired with the AI scorer: cheap rule prefilter
-			// narrows 561 → 100, BinanceOIEnricher fills OI/OI deltas/range_pos
-			// for those 100, and the model then reads enriched rows with
-			// substantially more signal per token. Rule-only path skips this
-			// — RuleScorer doesn't read OI, so the API budget would be wasted.
-			enricher = &BinanceOIEnricher{}
-			logger.Infof("🔭 [scanner] using AI scorer (claudecli) with rule fallback + Binance OI enrichment (top 100)")
+			// Scanner v2 pipeline:
+			//   - VolumeBypassPrefilter narrows 561 → 100 by 24h volume
+			//     plus a |Δ1h| ≥ 10% bypass for high-momentum small caps.
+			//   - DeepEnricher fans out per coin to OI history, 1h klines,
+			//     4h klines, top-trader L/S — the AI sees fully-formed
+			//     reports, not thin rows.
+			//   - AIScorer ranks ONLY the enriched ~100 candidates.
+			enricher = &DeepEnricher{}
+			prefilter = &VolumeBypassPrefilter{
+				VolumeTopK:      100,
+				BypassThreshold: 10,
+				MaxCandidates:   120,
+			}
+			logger.Infof("🔭 [scanner] v2 pipeline: VolumeBypassPrefilter(top=100, bypass≥10%%) → DeepEnricher → AIScorer(claudecli) → 30 watchlist; rule fallback for AI failures")
 		} else {
 			logger.Warnf("🔭 [scanner] NOFX_SCANNER_SCORER=ai but claudecli client unavailable — falling back to rule scorer")
 		}
 	}
 
 	defaultMgr = New(Config{
-		Interval:       10 * time.Minute,
+		// Interval: hourly. Scanner picks the watchlist; trading cycle (every
+		// 3 min on the watchlist) is what reacts to price moves. Refreshing
+		// candidates more often than 1h doesn't help because the same coins
+		// dominate volume & momentum signals for hours at a time.
+		Interval:       1 * time.Hour,
 		WatchlistSize:  30,
-		HistoryDepth:   12,
+		HistoryDepth:   24, // 24h of hourly snapshots
 		MissThreshold:  2,
 		FetchTickers:   BinanceTickerFetcher(),
 		FetchFunding:   BinanceFundingFetcher(),
 		Scorer:         scorer,
 		GetOpenSymbols: pendingPositionsFn,
 		Enricher:       enricher,
-		// PrefilterTopK defaults to 100 inside New() when Enricher is set.
+		Prefilter:      prefilter,
+		PrefilterTopK:  120,
 	})
 	go func() {
 		// Background-managed lifecycle. The scanner shuts down when the

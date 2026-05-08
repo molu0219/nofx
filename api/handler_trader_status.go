@@ -212,6 +212,18 @@ func (s *Server) handleClosePosition(c *gin.Context) {
 		} else {
 			createErr = fmt.Errorf("Lighter requires wallet address and API Key private key")
 		}
+	case "paper":
+		// Paper trader holds in-memory state (balance, positions, fills) that
+		// is NOT recoverable from credentials — it must come from the running
+		// AutoTrader instance owned by TraderManager. Building a fresh paper
+		// trader here would see balance=initial, positions=none and "close"
+		// would silently no-op against an empty book.
+		at, err := s.traderManager.GetTrader(traderID)
+		if err != nil || at == nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Paper trader not loaded; start it before closing"})
+			return
+		}
+		tempTrader = at.GetTrader()
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Unsupported exchange type"})
 		return

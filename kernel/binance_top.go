@@ -32,16 +32,33 @@ const binanceTickerHTTPTimeout = 8 * time.Second
 // binanceTicker24hr is the subset of fields we read from the venue response.
 // Binance returns a JSON array of objects keyed exactly like this.
 type binanceTicker24hr struct {
-	Symbol      string `json:"symbol"`
-	QuoteVolume string `json:"quoteVolume"` // 24h notional volume in USDT
+	Symbol             string `json:"symbol"`
+	LastPrice          string `json:"lastPrice"`
+	PriceChangePercent string `json:"priceChangePercent"` // 24h % change
+	QuoteVolume        string `json:"quoteVolume"`        // 24h notional volume in USDT
+	HighPrice          string `json:"highPrice"`
+	LowPrice           string `json:"lowPrice"`
+}
+
+// UniverseEntry is a lightweight per-symbol summary the AI sees for symbols
+// outside the deep-analysis subset. Carries just enough for "scan the whole
+// market for unusual activity" without paying full per-coin kline cost.
+type UniverseEntry struct {
+	Symbol       string  `json:"symbol"`
+	Price        float64 `json:"price"`
+	ChangePct24h float64 `json:"change_pct_24h"`
+	QuoteVolume  float64 `json:"quote_volume_24h"` // in USDT
+	HighPrice    float64 `json:"high_24h"`
+	LowPrice     float64 `json:"low_24h"`
 }
 
 // binanceTopCache holds the last successful pull. Read-mostly so an RWMutex
 // keeps the hot path (cache hit on every cycle) lock-free for readers.
 type binanceTopCache struct {
 	mu       sync.RWMutex
-	symbols  []string  // sorted desc by quote volume, USDT-suffixed
-	fetched  time.Time // zero = never fetched yet
+	symbols  []string        // sorted desc by quote volume, USDT-suffixed
+	entries  []UniverseEntry // same order as symbols, full ticker data
+	fetched  time.Time       // zero = never fetched yet
 }
 
 var topCache = &binanceTopCache{}
@@ -62,8 +79,8 @@ func FetchBinanceTopByVolume(limit int) ([]string, error) {
 	if limit <= 0 {
 		limit = 10
 	}
-	if limit > 50 {
-		limit = 50 // soft ceiling — token budget upstream caps the actual prompt size
+	if limit > 600 {
+		limit = 600 // hard ceiling — Binance lists ~561 perps; covers the universe
 	}
 
 	// Cache hit fast path.

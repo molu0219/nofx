@@ -1375,3 +1375,37 @@ func (t *Trader) settleCrossLiquidationsLocked() (changed bool) {
 // Time helper — exposed so tests can confirm the funding clock.
 func (t *Trader) lastFundingTimeUnsafe() time.Time { return t.lastFundingTime }
 
+// Reset wipes the trader's state back to a clean slate at the given balance:
+// no positions, no pending orders, no closed P&L history, no filled-order
+// cache, lastFundingTime cleared. The persistence row (if Store + ExchangeID
+// are wired) is overwritten with the fresh state.
+//
+// Used by the /api/paper/:exchange_id/reset admin endpoint when a user
+// wants to recycle a paper account — typically after a previous session
+// blew up or got polluted with positions from a deleted trader.
+//
+// Safe to call from any goroutine; takes the trader's write lock and only
+// fails if the persistence write itself errors. The trader does NOT need
+// to be stopped first — but if a decision cycle is mid-flight, its open /
+// close calls happening after this returns will operate on the fresh book.
+func (t *Trader) Reset(initialBalance float64) error {
+	if initialBalance <= 0 {
+		return fmt.Errorf("paper Reset: initialBalance must be > 0, got %.2f", initialBalance)
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.balance = initialBalance
+	t.positions = make(map[string]*Position)
+	t.orders = make(map[string]*pendingOrder)
+	t.filledOrders = make(map[string]*filledOrderRecord)
+	t.closed = nil
+	t.orderSeq = 0
+	t.lastFundingTime = time.Time{}
+	if err := t.persistLocked(); err != nil {
+		return fmt.Errorf("paper Reset: persist failed: %w", err)
+	}
+	logger.Infof("📄 [paper] reset: exchange=%s balance=%.2f USDT (positions/orders/history cleared)",
+		t.exchangeID, initialBalance)
+	return nil
+}
+

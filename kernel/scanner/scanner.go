@@ -30,14 +30,12 @@ import (
 	"nofx/logger"
 )
 
-// UniverseEntry is one symbol's snapshot the scanner produces. Everything
-// numerical the AI / scorer might want is here so consumers don't need to
-// re-fetch.
-//
-// OpenInterest + OIChg* are populated only for entries that survive the
-// prefilter step (typically top 100 by rule score) and an Enricher is
-// configured. For all other entries those fields stay zero — scorers should
-// treat zero as "not enriched", not as "actually zero OI".
+// UniverseEntry is one symbol's snapshot the scanner produces. Base fields
+// (price, deltas, vol, funding) are populated for every symbol; the rich
+// fields below (OI, klines, indicators, L/S) are populated only for entries
+// that survive the prefilter and reach the DeepEnricher. For non-enriched
+// entries those fields stay at their zero value — consumers must treat
+// zero as "not enriched", not as actually-zero data.
 type UniverseEntry struct {
 	Symbol         string    `json:"symbol"`
 	Price          float64   `json:"price"`
@@ -49,10 +47,48 @@ type UniverseEntry struct {
 	HighPrice24h   float64   `json:"high_24h"`
 	LowPrice24h    float64   `json:"low_24h"`
 	FundingRate    float64   `json:"funding_rate"`
-	OpenInterest   float64   `json:"open_interest"`        // base-coin units; 0 = not enriched
-	OIChg10m       float64   `json:"oi_change_10m_pct"`    // % vs 1 scan ago
-	OIChg1h        float64   `json:"oi_change_1h_pct"`     // % vs 6 scans ago
 	UpdatedAt      time.Time `json:"updated_at"`
+
+	// --- Enrichment fields (zero when not enriched) ---
+
+	// OpenInterest is the latest sumOpenInterest (base coin units).
+	OpenInterest float64 `json:"open_interest"`
+	// OIHistory is the 24-point hourly history (oldest → latest) used to
+	// compute the deltas below; included so the AI can reason about shape
+	// (sharp ramp vs gradual drift) not just the last delta.
+	OIHistory []float64 `json:"oi_history,omitempty"`
+	OIChg1h   float64   `json:"oi_change_1h_pct"`
+	OIChg4h   float64   `json:"oi_change_4h_pct"`
+	OIChg24h  float64   `json:"oi_change_24h_pct"`
+
+	// Klines1h is the last 24 1-hour candles (oldest → latest); Klines4h is
+	// the last ~7 days at 4h. Both included so the model can see candle
+	// shape (rejection wicks, expanding range) which an indicator alone
+	// would compress out.
+	Klines1h []Kline `json:"-"`
+	Klines4h []Kline `json:"-"`
+
+	// Indicators derived from Klines1h: MACD line, RSI(14), ATR(14).
+	MACD1h float64 `json:"macd_1h"`
+	RSI1h  float64 `json:"rsi_1h"`
+	ATR1h  float64 `json:"atr_1h"`
+
+	// Indicators derived from Klines4h.
+	MACD4h float64 `json:"macd_4h"`
+	RSI4h  float64 `json:"rsi_4h"`
+	ATR4h  float64 `json:"atr_4h"`
+
+	// LongShortHistory is the top-trader position L/S ratio series, 1h
+	// period, last 24h. Ratio > 1 = whales net long. The slope tells the
+	// model whether smart money is rotating.
+	LongShortHistory []LongShortRatio `json:"-"`
+	LongShortLatest  float64          `json:"long_short_latest"`
+
+	// ByPass marks a symbol that came through the |Δ1h| > 10% bypass — kept
+	// even when its volume rank wouldn't have qualified. Useful for log /
+	// diagnostic output ("we picked you because you moved, not because of
+	// volume").
+	ByPass bool `json:"bypass,omitempty"`
 }
 
 // RangePos returns where the current price sits inside the 24h high/low band,
@@ -235,17 +271,38 @@ func (s *Scanner) Refresh(ctx context.Context) error {
 	entries := s.buildEntries(tickers, funding, now)
 	s.pushHistory(now, entries)
 
-	// Prefilter + enrich: when an Enricher is wired, narrow the universe with
-	// the cheap rule scorer first, then upgrade those K entries with OI (and
-	// future indicators). The full entries slice gets mutated in place so
-	// downstream Scorer.Rank still sees the entire universe — just with
-	// richer data for the top candidates.
+	// Pipeline:
+	//   - With Enricher: prefilter narrows full universe → enrich those K
+	//     candidates → Scorer ranks ONLY the enriched candidates.
+	//   - Without Enricher: legacy single-stage path; Scorer ranks the
+	//     entire universe.
+	//
+	// Scoring only the enriched set (instead of the full universe) is the v2
+	// change: AI prompt cost is bounded by K, not by total perp count, and
+	// the model's attention isn't split across hundreds of thin rows.
+	var ranked []string
 	if s.cfg.Enricher != nil {
 		entries = s.enrichTopK(ctx, entries)
+		// Build a slice of just the enriched entries for the scorer. Order
+		// preserved (volume + bypass), so when the AI fallback fires it
+		// sees a deterministic prefilter ranking already.
+		enrichedSet := make(map[string]bool)
+		for _, sym := range s.cfg.Prefilter.Rank(entries) {
+			enrichedSet[sym] = true
+			if len(enrichedSet) >= s.cfg.PrefilterTopK {
+				break
+			}
+		}
+		enrichedOnly := make([]UniverseEntry, 0, len(enrichedSet))
+		for _, e := range entries {
+			if enrichedSet[e.Symbol] {
+				enrichedOnly = append(enrichedOnly, e)
+			}
+		}
+		ranked = s.cfg.Scorer.Rank(enrichedOnly)
+	} else {
+		ranked = s.cfg.Scorer.Rank(entries)
 	}
-
-	// Score the universe.
-	ranked := s.cfg.Scorer.Rank(entries)
 
 	// Build the new watchlist with position protection + hysteresis.
 	var open []string
@@ -269,10 +326,15 @@ func (s *Scanner) Refresh(ctx context.Context) error {
 }
 
 // enrichTopK runs the Prefilter to pick the top K most-promising entries,
-// then asks the Enricher to fill OI / etc on those. The returned slice is
-// the original entries with enriched fields filled in for picked symbols.
-// Errors from the Enricher are logged but not propagated — the universe is
-// still usable without enrichment, the AIScorer just sees thinner rows.
+// then asks the Enricher to fill heavy fields (OI history, klines, L/S) on
+// those. The returned slice is the original entries with enriched fields
+// filled in for picked symbols. Errors from the Enricher are logged but
+// not propagated — the universe is still usable without enrichment.
+//
+// Symbols selected via the prefilter's bypass branch (if it implements the
+// optional bypass-aware interface) are tagged with ByPass=true on the
+// returned entry so downstream code (and the AI prompt) can treat them
+// differently.
 func (s *Scanner) enrichTopK(ctx context.Context, entries []UniverseEntry) []UniverseEntry {
 	k := s.cfg.PrefilterTopK
 	if k <= 0 || k >= len(entries) {
@@ -283,6 +345,19 @@ func (s *Scanner) enrichTopK(ctx context.Context, entries []UniverseEntry) []Uni
 	idx := make(map[string]int, len(entries))
 	for i, e := range entries {
 		idx[e.Symbol] = i
+	}
+
+	// Mark bypass symbols upfront so the flag travels through to enrichment
+	// and the scorer's prompt builder. Optional contract: prefilters that
+	// don't support bypass simply don't satisfy the type assertion.
+	if bp, ok := s.cfg.Prefilter.(interface {
+		BypassSymbols(entries []UniverseEntry) []string
+	}); ok {
+		for _, sym := range bp.BypassSymbols(entries) {
+			if i, ok := idx[sym]; ok {
+				entries[i].ByPass = true
+			}
+		}
 	}
 
 	// Pick top K by prefilter rank (or all if smaller).
@@ -302,15 +377,30 @@ func (s *Scanner) enrichTopK(ctx context.Context, entries []UniverseEntry) []Uni
 		return entries
 	}
 
-	// Merge enriched fields back into the universe slice.
+	// Merge enriched fields back into the universe slice. We don't replace
+	// the entry wholesale because the base fields (Price, deltas from
+	// Scanner's own history) might be fresher than what the Enricher saw.
 	for _, e := range enriched {
 		i, ok := idx[e.Symbol]
 		if !ok {
 			continue
 		}
 		entries[i].OpenInterest = e.OpenInterest
-		entries[i].OIChg10m = e.OIChg10m
+		entries[i].OIHistory = e.OIHistory
 		entries[i].OIChg1h = e.OIChg1h
+		entries[i].OIChg4h = e.OIChg4h
+		entries[i].OIChg24h = e.OIChg24h
+		entries[i].Klines1h = e.Klines1h
+		entries[i].Klines4h = e.Klines4h
+		entries[i].MACD1h = e.MACD1h
+		entries[i].RSI1h = e.RSI1h
+		entries[i].ATR1h = e.ATR1h
+		entries[i].MACD4h = e.MACD4h
+		entries[i].RSI4h = e.RSI4h
+		entries[i].ATR4h = e.ATR4h
+		entries[i].LongShortHistory = e.LongShortHistory
+		entries[i].LongShortLatest = e.LongShortLatest
+		entries[i].ByPass = e.ByPass
 	}
 	return entries
 }

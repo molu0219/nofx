@@ -174,8 +174,8 @@ func TestBuildAIScorerUserPrompt_Compact(t *testing.T) {
 	if !strings.Contains(prompt, "BTCUSDT") {
 		t.Fatalf("BTC missing from prompt")
 	}
-	if !strings.Contains(prompt, "Δ10m=") || !strings.Contains(prompt, "vol=") {
-		t.Fatalf("expected delta + volume markers; got: %s", prompt[:200])
+	if !strings.Contains(prompt, "Δ10m=") || !strings.Contains(prompt, "Vol24h=") {
+		t.Fatalf("expected delta + Vol24h markers; got: %s", prompt[:200])
 	}
 	if !strings.Contains(prompt, "Pick the top 2") || !strings.Contains(prompt, "Output 2") {
 		t.Fatalf("expected top/output markers; got: %s", prompt[:300])
@@ -197,38 +197,90 @@ func TestFormatVolume_Brackets(t *testing.T) {
 	}
 }
 
-func TestBuildAIScorerUserPrompt_OmitsOIFieldsWhenNotEnriched(t *testing.T) {
+func TestBuildAIScorerUserPrompt_OmitsHeavyFieldsWhenNotEnriched(t *testing.T) {
 	entries := mkUniverse("BTCUSDT", "ETHUSDT")
 	prompt := buildAIScorerUserPrompt(entries, 1)
-	// OI markers must NOT appear when entries weren't enriched.
-	if strings.Contains(prompt, "oi=") || strings.Contains(prompt, "rangepos=") {
-		t.Fatalf("unenriched prompt should omit oi/rangepos markers; got: %s", prompt)
+	// Heavy markers must NOT appear when entries weren't enriched: no OI
+	// section, no 1h/4h indicator lines, no L/S line.
+	for _, marker := range []string{"OI=", "1h: MACD", "4h: MACD", "L/S(top)"} {
+		if strings.Contains(prompt, marker) {
+			t.Errorf("unenriched prompt should omit %q; got:\n%s", marker, prompt)
+		}
 	}
 }
 
-func TestBuildAIScorerUserPrompt_IncludesOIFieldsWhenEnriched(t *testing.T) {
+func TestBuildAIScorerUserPrompt_IncludesRichFieldsWhenEnriched(t *testing.T) {
 	entries := mkUniverse("BTCUSDT", "ETHUSDT")
-	// Enrich BTC only; ETH stays thin.
-	entries[0].OpenInterest = 100_000
-	entries[0].OIChg10m = 2.5
-	entries[0].OIChg1h = -3.5
+	// Enrich BTC fully; ETH stays thin.
+	entries[0].Price = 100
 	entries[0].HighPrice24h = 110
 	entries[0].LowPrice24h = 90
-	entries[0].Price = 100
+	entries[0].OpenInterest = 100_000
+	entries[0].OIHistory = []float64{95_000, 96_000, 99_000, 100_000}
+	entries[0].OIChg1h = 1
+	entries[0].OIChg4h = 5.3
+	entries[0].OIChg24h = 5.3
+	// Need ≥ 26 candles for indicator block to render.
+	klines := make([]Kline, 30)
+	for i := range klines {
+		klines[i] = Kline{Open: 100, High: 102, Low: 98, Close: 101 + float64(i)*0.1}
+	}
+	entries[0].Klines1h = klines
+	entries[0].MACD1h = 0.0125
+	entries[0].RSI1h = 62.5
+	entries[0].ATR1h = 1.42
+	entries[0].LongShortHistory = []LongShortRatio{{Ratio: 1.2}, {Ratio: 1.4}}
+	entries[0].LongShortLatest = 1.4
+
 	prompt := buildAIScorerUserPrompt(entries, 1)
-	if !strings.Contains(prompt, "oi=") {
-		t.Fatalf("enriched prompt should include oi= marker for BTC: %s", prompt)
+
+	for _, want := range []string{
+		"=== BTCUSDT ===",
+		"OI=",
+		"Δ1h=+1.00%",
+		"1h: MACD",
+		"RSI14=62.5",
+		"L/S(top)=1.400",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("expected %q in prompt; got:\n%s", want, prompt)
+		}
 	}
-	if !strings.Contains(prompt, "oi10m=+2.50%") {
-		t.Fatalf("enriched prompt should include oi10m delta: %s", prompt)
+
+	// ETH had no OI / no klines → its block should NOT carry the heavy
+	// markers (only the header). Count "1h: MACD" should be exactly 1.
+	if c := strings.Count(prompt, "1h: MACD"); c != 1 {
+		t.Errorf("1h: MACD should appear exactly once (only enriched BTC), got %d", c)
 	}
-	if !strings.Contains(prompt, "rangepos=0.50") {
-		t.Fatalf("range_pos = (100-90)/(110-90) = 0.50 not in prompt: %s", prompt)
+}
+
+func TestFormatEntryBlock_BypassTagged(t *testing.T) {
+	e := mkUniverse("PUMPUSDT")[0]
+	e.ByPass = true
+	got := formatEntryBlock(e)
+	if !strings.Contains(got, "=== PUMPUSDT (bypass) ===") {
+		t.Fatalf("bypass tag missing: %s", got)
 	}
-	// ETH had no OI → must NOT have oi= on its line. Easiest check: it should
-	// only appear once (BTC's line).
-	if c := strings.Count(prompt, "oi="); c != 1 {
-		t.Fatalf("oi= should appear on exactly 1 line, got %d (\nprompt: %s)", c, prompt)
+}
+
+func TestCompressFloats(t *testing.T) {
+	cases := []struct {
+		name   string
+		values []float64
+		n      int
+		want   string
+	}{
+		{"empty", nil, 6, ""},
+		{"shorter than n", []float64{1, 2, 3}, 6, "1.00,2.00,3.00"},
+		{"evenly spaced", []float64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, 4, "1.00,4.00,8.00,12.00"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := compressFloats(c.values, c.n)
+			if got != c.want {
+				t.Errorf("got %q want %q", got, c.want)
+			}
+		})
 	}
 }
 

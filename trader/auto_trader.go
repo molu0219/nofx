@@ -646,6 +646,16 @@ func (at *AutoTrader) SetNotifier(n Notifier) {
 	at.notifier = n
 }
 
+// GetTrader returns the underlying exchange Trader (paper / binance / etc.)
+// the AutoTrader owns. Exposed so close-position and reset paths can act on
+// the live state — particularly for paper, where the in-memory positions
+// live on this instance and can't be reconstructed from credentials.
+func (at *AutoTrader) GetTrader() Trader {
+	at.isRunningMutex.RLock()
+	defer at.isRunningMutex.RUnlock()
+	return at.trader
+}
+
 // AutoPauseReason returns the human-readable reason the trader auto-paused
 // itself, or the empty string if the trader is running normally / was stopped
 // manually. Used by /api/status to surface the cause to the dashboard.
