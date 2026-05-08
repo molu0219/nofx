@@ -154,9 +154,14 @@ func (o *StrategyOptimizer) review(cycle int) error {
 	stats, _ := o.Store.Position().GetFullStats(o.TraderID)
 	orders, _ := o.Store.Order().GetTraderOrders(o.TraderID, lookback)
 	equity, _ := o.Store.Equity().GetLatest(o.TraderID, 50)
+	// PR4: feed the optimizer its own track record so it can ground the
+	// next change in past changes' actual outcomes (wins/losses/net PnL
+	// of decisions made under each version) instead of just current
+	// aggregate stats. Last 5 versions = ~enough context, ~minimal cost.
+	versions, _ := o.Store.StrategyVersion().RecentForTraderWithMetrics(o.TraderID, 5)
 
 	systemPrompt := o.buildSystemPrompt()
-	userPrompt := o.buildUserPrompt(&cfg, decisions, stats, orders, equity)
+	userPrompt := o.buildUserPrompt(&cfg, decisions, stats, orders, equity, versions)
 
 	resp, err := o.AIClient.CallWithMessages(systemPrompt, userPrompt)
 	if err != nil {
@@ -182,7 +187,11 @@ func (o *StrategyOptimizer) review(cycle int) error {
 	}
 	strategy.Config = string(configJSON)
 	strategy.UpdatedAt = time.Now().UTC()
-	if err := o.Store.Strategy().Update(strategy); err != nil {
+	// UpdateWithAudit appends a strategy_versions row stamped "optimizer"
+	// plus the model's reasoning. Decisions made with this config will be
+	// tagged with the new version_num so PR4's track-record loop can
+	// correlate "this change → that outcome".
+	if err := o.Store.Strategy().UpdateWithAudit(strategy, "optimizer", suggestion.Reasoning); err != nil {
 		return fmt.Errorf("persist strategy: %w", err)
 	}
 
@@ -492,7 +501,7 @@ Constraints:
 }
 
 // buildUserPrompt formats the live data the optimizer needs to make a call.
-func (o *StrategyOptimizer) buildUserPrompt(cfg *store.StrategyConfig, decisions []*store.DecisionRecord, stats *store.TraderStats, orders []*store.TraderOrder, equity []*store.EquitySnapshot) string {
+func (o *StrategyOptimizer) buildUserPrompt(cfg *store.StrategyConfig, decisions []*store.DecisionRecord, stats *store.TraderStats, orders []*store.TraderOrder, equity []*store.EquitySnapshot, versions []store.VersionWithMetrics) string {
 	var sb strings.Builder
 
 	sb.WriteString("# Objective (the metric we're optimising for)\n\n")
@@ -545,6 +554,31 @@ func (o *StrategyOptimizer) buildUserPrompt(cfg *store.StrategyConfig, decisions
 
 	sb.WriteString("# Structural config (read-only, not tunable here)\n\n")
 	sb.WriteString(fmt.Sprintf("- coin_source type: %s\n\n", cfg.CoinSource.SourceType))
+
+	// PR4: track-record loop. Show the optimizer its own past N changes
+	// + the actual outcomes under each. Avoids the "change for change's
+	// sake" failure mode where we revert a change that just hadn't yet
+	// had time to show up in the aggregate stats.
+	if len(versions) > 0 {
+		sb.WriteString("# Your own track record (most recent change first)\n")
+		sb.WriteString("(Each row = a config revision you (or a user) made. Decisions = how many trader cycles ran under that version. Trades = positions actually opened. Closed = wins/losses with realized PnL. Net PnL = realized USDT delta. Open trades show as Trades > Wins+Losses with NetPnL = 0.)\n\n")
+		for _, v := range versions {
+			src := v.Version.ChangeSource
+			if src == "" {
+				src = "unknown"
+			}
+			sb.WriteString(fmt.Sprintf(
+				"- v%d (%s, %s): decisions=%d trades=%d wins=%d losses=%d net=%+.2f USDT win_rate=%.1f%%\n",
+				v.Version.VersionNum, src,
+				v.Version.CreatedAt.Format("2006-01-02 15:04"),
+				v.Decisions, v.Trades, v.WinTrades, v.LossTrades, v.NetPnL, v.WinRate*100,
+			))
+			if reason := strings.TrimSpace(v.Version.Reasoning); reason != "" {
+				sb.WriteString("    reasoning: " + truncateTo(reason, 200) + "\n")
+			}
+		}
+		sb.WriteString("\nUse this history. If your last change clearly hurt PnL, consider reverting (cite v_n in your reasoning). If a change hasn't accumulated enough closed trades to judge, say 'wait — v_n needs more data' and make a smaller, lower-risk tweak instead.\n\n")
+	}
 
 	if stats != nil && stats.TotalTrades > 0 {
 		sb.WriteString("# Aggregate trade stats\n\n")

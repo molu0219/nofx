@@ -233,6 +233,15 @@ Use this to enable/disable an exchange or update API credentials. The "id" field
 Body: {"initial_balance":<number, default 10000>}.
 Wipes the trader's positions, pending orders, and closed PnL history; restores balance to initial_balance. Use to recycle a paper trader for a fresh test without recreating it.`,
 				s.handleResetPaperTrader)
+			s.routeWithSchema(protected, "GET", "/traders/:id/decision-outcomes", "List recent decisions joined with their strategy version and resulting position outcome",
+				`:id = trader id. Query: ?limit=<int, default 200, max 1000>.
+Each row = one decision, with: cycle_number, timestamp, strategy_version_num + change_source (was the change made by user/optimizer), position_id (0 if no position opened), symbol, side, entry_price, exit_price, realized_pnl, position_status, close_reason, duration_min.
+Use this to see "did decisions made under config v7 actually win" and to overlay strategy-change events on the equity chart.`,
+				s.handleDecisionOutcomes)
+			s.routeWithSchema(protected, "GET", "/traders/:id/strategy-versions", "List the strategy version timeline for a trader (oldest first)",
+				`:id = trader id. Query: ?limit=<int, default 50, max 200>.
+Each row = one strategy revision: version_num, change_source ("user" | "optimizer" | "system"), reasoning, created_at, config_json (full snapshot for rollback / diff).`,
+				s.handleStrategyVersionsTimeline)
 
 			// Telegram bot configuration
 			s.routeWithSchema(protected, "GET", "/telegram", "Get Telegram bot configuration",

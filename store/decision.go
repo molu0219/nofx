@@ -30,7 +30,12 @@ type DecisionRecordDB struct {
 	Success             bool      `gorm:"default:false"`
 	ErrorMessage        string    `gorm:"column:error_message;default:''"`
 	AIRequestDurationMs int64     `gorm:"column:ai_request_duration_ms;default:0"`
-	CreatedAt           time.Time `json:"created_at"`
+	// StrategyVersionID stamps which strategy_versions row was live when
+	// this decision was made. Zero = unstamped (cycle ran before the audit
+	// table was wired or strategy is unversioned). Indexed for fast
+	// optimizer feedback aggregation.
+	StrategyVersionID int64     `gorm:"column:strategy_version_id;default:0;index"`
+	CreatedAt         time.Time `json:"created_at"`
 }
 
 func (DecisionRecordDB) TableName() string { return "decision_records" }
@@ -54,6 +59,9 @@ type DecisionRecord struct {
 	AccountState        AccountSnapshot    `json:"account_state"`
 	Positions           []PositionSnapshot `json:"positions"`
 	Decisions           []DecisionAction   `json:"decisions"`
+	// StrategyVersionID stamps which strategy_versions row was active when
+	// this decision was made. AutoTrader fills this in before LogDecision.
+	StrategyVersionID int64 `json:"strategy_version_id,omitempty"`
 }
 
 // AccountSnapshot account state snapshot
@@ -172,6 +180,7 @@ func (s *DecisionStore) LogDecision(record *DecisionRecord) error {
 		Success:             record.Success,
 		ErrorMessage:        record.ErrorMessage,
 		AIRequestDurationMs: record.AIRequestDurationMs,
+		StrategyVersionID:   record.StrategyVersionID,
 	}
 
 	if err := s.db.Create(dbRecord).Error; err != nil {

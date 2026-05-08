@@ -116,6 +116,14 @@ type TraderPosition struct {
 	Status             string  `gorm:"column:status;default:OPEN;index:idx_positions_status" json:"status"`
 	CloseReason        string  `gorm:"column:close_reason;default:''" json:"close_reason"`
 	Source             string  `gorm:"column:source;default:system" json:"source"`
+	// OpenedByDecisionID links this position back to the decision_records
+	// row that opened it. Zero = unknown (manual close, legacy data, or
+	// auto-trigger like SL/TP/liquidation that wasn't AI-driven).
+	// ClosedByDecisionID is set when an AI decision actually closed the
+	// position (vs SL/TP firing on the venue) — useful for attributing
+	// "decision quality" to the right cycle.
+	OpenedByDecisionID int64 `gorm:"column:opened_by_decision_id;default:0;index" json:"opened_by_decision_id,omitempty"`
+	ClosedByDecisionID int64 `gorm:"column:closed_by_decision_id;default:0;index" json:"closed_by_decision_id,omitempty"`
 	CreatedAt          int64   `gorm:"column:created_at" json:"created_at"`   // Unix milliseconds UTC
 	UpdatedAt          int64   `gorm:"column:updated_at" json:"updated_at"`   // Unix milliseconds UTC
 }

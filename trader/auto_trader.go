@@ -181,6 +181,12 @@ type AutoTrader struct {
 	store                 *store.Store           // Data storage (decision records, etc.)
 	strategyEngine        *kernel.StrategyEngine // Strategy engine (uses strategy configuration)
 	cycleNumber           int                    // Current cycle number
+	// lastDecisionID is the decision_records.id of the most recently logged
+	// decision. recordPositionChange stamps it onto trader_positions.opened_by_decision_id
+	// so analytics can join "this position came from that decision". Zero
+	// when no decision has been logged yet (e.g. SL/TP fires before any
+	// AI decision).
+	lastDecisionID        int64
 	initialBalance        float64
 	dailyPnL              float64
 	customPrompt          string // Custom trading strategy prompt

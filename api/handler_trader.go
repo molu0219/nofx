@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -871,6 +872,64 @@ func (s *Server) handleStopTrader(c *gin.Context) {
 
 	logger.Infof("⏹  Trader %s stopped", trader.GetName())
 	c.JSON(http.StatusOK, gin.H{"message": "Trader stopped"})
+}
+
+// handleDecisionOutcomes returns recent decisions joined with the strategy
+// version they ran under and the position outcome (if any). Used by the
+// diagnostic page to answer "did config v7 actually win" and to surface
+// the per-decision PnL granularity the user asked for (vs aggregate ROI).
+func (s *Server) handleDecisionOutcomes(c *gin.Context) {
+	userID := c.GetString("user_id")
+	traderID := c.Param("id")
+	if traderID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Trader ID required"})
+		return
+	}
+	// Ownership check (cheap — single row).
+	if _, err := s.store.Trader().GetFullConfig(userID, traderID); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Trader not found"})
+		return
+	}
+	limit := 200
+	if v := c.Query("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	rows, err := s.store.DecisionOutcomes().ListForTrader(traderID, limit)
+	if err != nil {
+		SafeInternalError(c, "Failed to load decision outcomes", err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"outcomes": rows})
+}
+
+// handleStrategyVersionsTimeline returns the chronological strategy version
+// history for the trader's strategy. Powers the timeline overlay on the
+// diagnostic page.
+func (s *Server) handleStrategyVersionsTimeline(c *gin.Context) {
+	userID := c.GetString("user_id")
+	traderID := c.Param("id")
+	if traderID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Trader ID required"})
+		return
+	}
+	if _, err := s.store.Trader().GetFullConfig(userID, traderID); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Trader not found"})
+		return
+	}
+	limit := 50
+	if v := c.Query("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	rows, err := s.store.DecisionOutcomes().VersionTimeline(traderID, limit)
+	if err != nil {
+		SafeInternalError(c, "Failed to load version timeline", err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"versions": rows})
 }
 
 // handleResetPaperTrader wipes one paper trader's persisted state back to a

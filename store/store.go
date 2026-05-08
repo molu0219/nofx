@@ -29,8 +29,9 @@ type Store struct {
 	order          *OrderStore
 	grid           *GridStore
 	aiCharge       *AIChargeStore
-	telegramConfig TelegramConfigStore
-	paperState     *PaperStateStore
+	telegramConfig  TelegramConfigStore
+	paperState      *PaperStateStore
+	strategyVersion *StrategyVersionStore
 
 	mu sync.RWMutex
 }
@@ -167,6 +168,9 @@ func (s *Store) initTables() error {
 	}
 	if err := s.PaperState().initTables(); err != nil {
 		return fmt.Errorf("failed to initialize paper state tables: %w", err)
+	}
+	if err := s.StrategyVersion().initTables(); err != nil {
+		return fmt.Errorf("failed to initialize strategy version tables: %w", err)
 	}
 	return nil
 }
@@ -319,6 +323,24 @@ func (s *Store) PaperState() *PaperStateStore {
 		s.paperState = NewPaperStateStore(s.gdb)
 	}
 	return s.paperState
+}
+
+// StrategyVersion gets the append-only audit log of strategy config changes.
+// Each row is one revision; AutoTrader stamps decisions with the live
+// version_num so analytics can answer "which config produced this trade".
+func (s *Store) StrategyVersion() *StrategyVersionStore {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.strategyVersion == nil {
+		s.strategyVersion = NewStrategyVersionStore(s.gdb)
+	}
+	return s.strategyVersion
+}
+
+// DecisionOutcomes returns the joined-view reader. Stateless, so we just
+// build a fresh one each call — no field on Store needed.
+func (s *Store) DecisionOutcomes() *DecisionOutcomesStore {
+	return NewDecisionOutcomesStore(s.gdb)
 }
 
 // Close closes database connection

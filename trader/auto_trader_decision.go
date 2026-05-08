@@ -32,7 +32,11 @@ func (at *AutoTrader) saveEquitySnapshot(ctx *kernel.Context) {
 	}
 }
 
-// saveDecision saves AI decision log to database (only records AI input/output, for debugging)
+// saveDecision saves AI decision log to database (only records AI input/output, for debugging).
+// Also stamps the live strategy_version_id so the optimizer feedback loop
+// can later attribute "decisions made under config v7" to the right
+// strategy revision. Best-effort: a missing version simply leaves the
+// stamp at zero, which is the legacy / unstamped indicator.
 func (at *AutoTrader) saveDecision(record *store.DecisionRecord) error {
 	if at.store == nil {
 		return nil
@@ -46,12 +50,24 @@ func (at *AutoTrader) saveDecision(record *store.DecisionRecord) error {
 		record.Timestamp = time.Now().UTC()
 	}
 
+	// Resolve the trader's current strategy version. Cheap query on indexed
+	// strategy_id; if the strategy has never been audited we just leave the
+	// stamp at zero — analytics treat zero as "unstamped, ignore".
+	if record.StrategyVersionID == 0 && at.config.StrategyID != "" {
+		if v, err := at.store.StrategyVersion().Latest(at.config.StrategyID); err == nil && v != nil {
+			record.StrategyVersionID = int64(v.ID)
+		}
+	}
+
 	if err := at.store.Decision().LogDecision(record); err != nil {
 		logger.Infof("⚠️ Failed to save decision record: %v", err)
 		return err
 	}
+	// Cache the freshly-assigned id so any position changes triggered by
+	// this cycle's execution can stamp themselves with the right decision.
+	at.lastDecisionID = record.ID
 
-	logger.Infof("📝 Decision record saved: trader=%s, cycle=%d", at.id, at.cycleNumber)
+	logger.Infof("📝 Decision record saved: trader=%s, cycle=%d, id=%d", at.id, at.cycleNumber, record.ID)
 	return nil
 }
 
@@ -370,19 +386,20 @@ func (at *AutoTrader) recordPositionChange(orderID, symbol, side, action string,
 		// Open position: create new position record
 		nowMs := time.Now().UTC().UnixMilli()
 		pos := &store.TraderPosition{
-			TraderID:     at.id,
-			ExchangeID:   at.exchangeID, // Exchange account UUID
-			ExchangeType: at.exchange,   // Exchange type: binance/bybit/okx/etc
-			Symbol:       symbol,
-			Side:         side, // LONG or SHORT
-			Quantity:     quantity,
-			EntryPrice:   price,
-			EntryOrderID: orderID,
-			EntryTime:    nowMs,
-			Leverage:     leverage,
-			Status:       "OPEN",
-			CreatedAt:    nowMs,
-			UpdatedAt:    nowMs,
+			TraderID:           at.id,
+			ExchangeID:         at.exchangeID, // Exchange account UUID
+			ExchangeType:       at.exchange,   // Exchange type: binance/bybit/okx/etc
+			Symbol:             symbol,
+			Side:               side, // LONG or SHORT
+			Quantity:           quantity,
+			EntryPrice:         price,
+			EntryOrderID:       orderID,
+			EntryTime:          nowMs,
+			Leverage:           leverage,
+			Status:             "OPEN",
+			OpenedByDecisionID: at.lastDecisionID, // 0 if no decision logged yet
+			CreatedAt:          nowMs,
+			UpdatedAt:          nowMs,
 		}
 		if err := at.store.Position().Create(pos); err != nil {
 			logger.Infof("  ⚠️ Failed to record position: %v", err)

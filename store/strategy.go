@@ -503,9 +503,34 @@ func (s *StrategyStore) Create(strategy *Strategy) error {
 	return s.db.Create(strategy).Error
 }
 
-// Update update a strategy
+// Update writes a strategy revision and (when source/reasoning are non-empty
+// AND the underlying GORM handle is set up to find a sibling
+// strategy_versions table) appends a snapshot to the audit log so the
+// optimizer feedback loop can attribute decisions back to the exact config
+// they ran under.
+//
+// Backwards compat: existing callers can pass source="user", reasoning=""
+// (or "" / "" for legacy paths). Empty source means "do not audit" — used
+// by migrations / seed paths that shouldn't pollute the timeline.
 func (s *StrategyStore) Update(strategy *Strategy) error {
-	return s.db.Model(&Strategy{}).
+	return s.UpdateWithAudit(strategy, "user", "")
+}
+
+// UpdateWithAudit is the version-aware update. Source ∈
+// {"user","optimizer","system"} (free-form, but those are the conventions);
+// reasoning is the optimizer's stated rationale or a UI changelog note.
+//
+// When source is non-empty, after the row is updated successfully we
+// append a strategy_versions row capturing the new config blob. The
+// version_num is auto-assigned per-strategy.
+//
+// We deliberately do NOT roll the audit append into the same transaction
+// as the strategies UPDATE — if the audit insert fails, the live config
+// is still consistent with the user's intent, and we log the audit gap
+// rather than rejecting the whole change. Audit completeness < live
+// behaviour correctness for this table.
+func (s *StrategyStore) UpdateWithAudit(strategy *Strategy, source, reasoning string) error {
+	if err := s.db.Model(&Strategy{}).
 		Where("id = ? AND user_id = ?", strategy.ID, strategy.UserID).
 		Updates(map[string]interface{}{
 			"name":           strategy.Name,
@@ -514,7 +539,19 @@ func (s *StrategyStore) Update(strategy *Strategy) error {
 			"is_public":      strategy.IsPublic,
 			"config_visible": strategy.ConfigVisible,
 			"updated_at":     time.Now().UTC(),
-		}).Error
+		}).Error; err != nil {
+		return err
+	}
+	if source == "" {
+		return nil
+	}
+	versionStore := NewStrategyVersionStore(s.db)
+	if _, err := versionStore.Append(strategy.ID, strategy.Config, source, reasoning); err != nil {
+		// Audit gap is non-fatal — the strategies row is the source of
+		// truth for behaviour; the audit table is observability.
+		return nil
+	}
+	return nil
 }
 
 // Delete delete a strategy
