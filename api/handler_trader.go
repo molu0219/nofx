@@ -991,6 +991,15 @@ func (s *Server) handleResetPaperTrader(c *gin.Context) {
 		}
 	}
 
+	// Wipe equity snapshots regardless of live/offline path — otherwise
+	// the chart stitches the fresh balance onto the previous run's curve
+	// and the user sees a $9K cliff that isn't real.
+	if rows, err := s.store.Equity().DeleteByTrader(traderID); err != nil {
+		logger.Warnf("⚠️ paper reset: failed to clear equity history for %s: %v", traderID, err)
+	} else if rows > 0 {
+		logger.Infof("📄 Reset paper trader %s: cleared %d equity snapshots", traderID, rows)
+	}
+
 	// Prefer live in-memory reset when the trader is loaded — otherwise the
 	// next persist would clobber our DB delete.
 	if at, err := s.traderManager.GetTrader(traderID); err == nil && at != nil {

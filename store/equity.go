@@ -117,6 +117,22 @@ func (s *EquityStore) GetAllTradersLatest() (map[string]*EquitySnapshot, error) 
 	return result, nil
 }
 
+// DeleteByTrader removes every equity snapshot for a trader. Used by the
+// paper-reset path so the equity curve starts fresh from the reset
+// moment instead of stitching the new initial-balance row onto the
+// previous run's stale points (which makes the chart look like a $9K
+// drawdown when really the user just hit reset).
+func (s *EquityStore) DeleteByTrader(traderID string) (int64, error) {
+	if traderID == "" {
+		return 0, fmt.Errorf("equity: trader_id is required")
+	}
+	result := s.db.Where("trader_id = ?", traderID).Delete(&EquitySnapshot{})
+	if result.Error != nil {
+		return 0, fmt.Errorf("equity: delete by trader: %w", result.Error)
+	}
+	return result.RowsAffected, nil
+}
+
 // CleanOldRecords cleans old records from N days ago
 func (s *EquityStore) CleanOldRecords(traderID string, days int) (int64, error) {
 	cutoffTime := time.Now().AddDate(0, 0, -days)
