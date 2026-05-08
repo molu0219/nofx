@@ -1156,6 +1156,26 @@ export const translations = {
       all: 'All',
     },
 
+    // DecisionOutcomesPanel
+    decisionOutcomes: {
+      title: 'Decision Outcomes',
+      decisions: 'decisions',
+      closed: 'closed',
+      refresh: 'Refresh',
+      versionTimeline: 'Strategy versions',
+      versions: 'versions',
+      byOptimizer: 'by optimizer',
+      byUser: 'by user',
+      cycle: 'Cycle',
+      time: 'Time',
+      symbol: 'Symbol',
+      entry: 'Entry',
+      exit: 'Exit',
+      status: 'Status',
+      empty: 'No decisions recorded yet — let the trader run a few cycles.',
+      show: 'Show',
+    },
+
     // TraderDashboardPage
     traderDashboard: {
       connectionFailed: 'Connection Failed',
@@ -2485,6 +2505,25 @@ export const translations = {
       all: '全部',
     },
 
+    decisionOutcomes: {
+      title: '决策结果',
+      decisions: '次决策',
+      closed: '已平仓',
+      refresh: '刷新',
+      versionTimeline: '策略版本',
+      versions: '个版本',
+      byOptimizer: '由优化器',
+      byUser: '由用户',
+      cycle: '周期',
+      time: '时间',
+      symbol: '标的',
+      entry: '开仓',
+      exit: '平仓',
+      status: '状态',
+      empty: '尚无决策记录 — 让交易员跑几个周期再看。',
+      show: '显示',
+    },
+
     traderDashboard: {
       connectionFailed: '无法连接到服务器',
       connectionFailedDesc: '请确认后端服务已启动。',
@@ -3759,6 +3798,25 @@ export const translations = {
       '7d': '7H',
       '30d': '30H',
       all: 'Semua',
+    },
+
+    decisionOutcomes: {
+      title: 'Hasil Keputusan',
+      decisions: 'keputusan',
+      closed: 'tertutup',
+      refresh: 'Muat Ulang',
+      versionTimeline: 'Versi strategi',
+      versions: 'versi',
+      byOptimizer: 'oleh optimizer',
+      byUser: 'oleh pengguna',
+      cycle: 'Siklus',
+      time: 'Waktu',
+      symbol: 'Simbol',
+      entry: 'Masuk',
+      exit: 'Keluar',
+      status: 'Status',
+      empty: 'Belum ada keputusan — biarkan trader berjalan beberapa siklus.',
+      show: 'Tampilkan',
     },
 
     traderDashboard: {

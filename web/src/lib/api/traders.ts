@@ -2,6 +2,8 @@ import type {
   TraderInfo,
   TraderConfigData,
   CreateTraderRequest,
+  DecisionOutcome,
+  StrategyVersion,
 } from '../../types'
 import { API_BASE, httpClient } from './helpers'
 import { ApiError } from '../httpClient'
@@ -94,6 +96,36 @@ export const traderApi = {
     )
     if (!result.success) throw new Error('Failed to close position')
     return result.data!
+  },
+
+  // getDecisionOutcomes returns recent decisions joined with their strategy
+  // version and any position outcome. Powers the diagnostic panel — each
+  // row tells you "this cycle made this decision under config v7, opened
+  // this position, closed at this PnL".
+  async getDecisionOutcomes(
+    traderId: string,
+    limit = 100
+  ): Promise<DecisionOutcome[]> {
+    const result = await httpClient.request<{ outcomes: DecisionOutcome[] }>(
+      `${API_BASE}/traders/${traderId}/decision-outcomes?limit=${limit}`,
+      { silent: true }
+    )
+    if (!result.success) throw new Error('Failed to fetch decision outcomes')
+    return result.data?.outcomes ?? []
+  },
+
+  // getStrategyVersions returns the trader's strategy revision timeline,
+  // oldest first. Each row = one config change with source + reasoning.
+  async getStrategyVersions(
+    traderId: string,
+    limit = 50
+  ): Promise<StrategyVersion[]> {
+    const result = await httpClient.request<{ versions: StrategyVersion[] }>(
+      `${API_BASE}/traders/${traderId}/strategy-versions?limit=${limit}`,
+      { silent: true }
+    )
+    if (!result.success) throw new Error('Failed to fetch strategy versions')
+    return result.data?.versions ?? []
   },
 
   // resetPaper wipes a paper trader's simulated state back to a clean

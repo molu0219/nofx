@@ -48,10 +48,10 @@ export interface DecisionAction {
   quantity: number
   leverage: number
   price: number
-  stop_loss?: number      // Stop loss price
-  take_profit?: number    // Take profit price
-  confidence?: number     // AI confidence (0-100)
-  reasoning?: string      // Brief reasoning
+  stop_loss?: number // Stop loss price
+  take_profit?: number // Take profit price
+  confidence?: number // AI confidence (0-100)
+  reasoning?: string // Brief reasoning
   order_id: number
   timestamp: string
   success: boolean
@@ -132,10 +132,10 @@ export interface TraderConfigData {
   trader_name: string
   ai_model: string
   exchange_id: string
-  strategy_id?: string  // 策略ID
-  strategy_name?: string  // 策略名称
+  strategy_id?: string // 策略ID
+  strategy_name?: string // 策略名称
   is_cross_margin: boolean
-  show_in_competition: boolean  // 是否在竞技场显示
+  show_in_competition: boolean // 是否在竞技场显示
   scan_interval_minutes: number
   initial_balance: number
   is_running: boolean
@@ -248,4 +248,43 @@ export interface GridRiskInfo {
   // Breakout state
   breakout_level: string
   breakout_direction: string
+}
+
+// DecisionOutcome is one row from /api/traders/:id/decision-outcomes — a
+// decision joined with the strategy version it ran under and the position
+// outcome (if any). Powers the diagnostic panel.
+//
+// Field semantics:
+//   - position_id 0 → decision didn't open a position (WAIT, CLOSE, or
+//     OPEN that never executed)
+//   - realized_pnl is meaningful only when position_status === 'CLOSED'
+//   - duration_min is 0 unless both entry_time and exit_time are set
+export interface DecisionOutcome {
+  decision_id: number
+  cycle_number: number
+  timestamp: string
+  success: boolean
+  strategy_version_num: number
+  strategy_change_source: string
+  position_id?: number
+  symbol?: string
+  side?: string
+  entry_price?: number
+  exit_price?: number
+  realized_pnl: number
+  position_status?: string
+  close_reason?: string
+  duration_min?: number
+}
+
+// StrategyVersion is one revision of a strategy's config. Returned oldest-
+// first by /api/traders/:id/strategy-versions for timeline rendering.
+export interface StrategyVersion {
+  id: number
+  strategy_id: string
+  version_num: number
+  config_json: string
+  change_source: string // "user" | "optimizer" | "system"
+  reasoning: string
+  created_at: string
 }

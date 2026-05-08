@@ -4,6 +4,7 @@ import { api } from '../lib/api'
 import { ChartTabs } from '../components/charts/ChartTabs'
 import { DecisionCard } from '../components/trader/DecisionCard'
 import { PositionHistory } from '../components/trader/PositionHistory'
+import { DecisionOutcomesPanel } from '../components/trader/DecisionOutcomesPanel'
 import { PunkAvatar, getTraderAvatar } from '../components/common/PunkAvatar'
 import { confirmToast, notify } from '../lib/notify'
 import { formatPrice, formatQuantity } from '../utils/format'
@@ -1063,6 +1064,16 @@ export function TraderDashboardPage({
               </h2>
             </div>
             <PositionHistory traderId={selectedTraderId} />
+          </div>
+        )}
+
+        {/* Decision Outcomes — per-decision PnL + strategy version timeline */}
+        {selectedTraderId && (
+          <div className="mt-6">
+            <DecisionOutcomesPanel
+              traderId={selectedTraderId}
+              language={language}
+            />
           </div>
         )}
       </div>
