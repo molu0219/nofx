@@ -728,7 +728,7 @@ func TestPersistence_RoundTripsAcrossReinit(t *testing.T) {
 	tr1, err := New(Config{
 		InitialBalance: 10_000, FeeBps: 0,
 		MarkPriceFunc: mp.get,
-		Store:         st, ExchangeID: "test-exchange-1",
+		Store:         st, TraderID: "test-trader-1",
 	})
 	if err != nil {
 		t.Fatalf("New#1: %v", err)
@@ -755,7 +755,7 @@ func TestPersistence_RoundTripsAcrossReinit(t *testing.T) {
 		InitialBalance: 999_999, // ignored when state hydrates
 		FeeBps:         0,
 		MarkPriceFunc:  mp.get,
-		Store:          st, ExchangeID: "test-exchange-1",
+		Store:          st, TraderID: "test-trader-1",
 	})
 	if err != nil {
 		t.Fatalf("New#2 (hydrate): %v", err)
@@ -788,19 +788,19 @@ func TestPersistence_FreshExchangeRequiresInitialBalance(t *testing.T) {
 	st := newPaperStore(t)
 	if _, err := New(Config{
 		InitialBalance: 0, // missing
-		Store:          st, ExchangeID: "fresh-no-balance",
+		Store:          st, TraderID: "fresh-no-balance",
 	}); err == nil {
 		t.Fatalf("expected error when no persisted state and no InitialBalance")
 	}
 }
 
-func TestPersistence_StoreAndExchangeIDMustAgree(t *testing.T) {
+func TestPersistence_StoreAndTraderIDMustAgree(t *testing.T) {
 	st := newPaperStore(t)
 	if _, err := New(Config{InitialBalance: 1000, Store: st}); err == nil {
-		t.Fatalf("expected error when Store set without ExchangeID")
+		t.Fatalf("expected error when Store set without TraderID")
 	}
-	if _, err := New(Config{InitialBalance: 1000, ExchangeID: "x"}); err == nil {
-		t.Fatalf("expected error when ExchangeID set without Store")
+	if _, err := New(Config{InitialBalance: 1000, TraderID: "x"}); err == nil {
+		t.Fatalf("expected error when TraderID set without Store")
 	}
 }
 
@@ -811,7 +811,7 @@ func TestPersistence_LiquidationSurvivesRestart(t *testing.T) {
 	tr1, _ := New(Config{
 		InitialBalance: 1_000, FeeBps: 0,
 		MarkPriceFunc: mp.get,
-		Store:         st, ExchangeID: "liq-test",
+		Store:         st, TraderID: "liq-test",
 	})
 	if _, err := tr1.OpenLong("BTCUSDT", 1, 5); err != nil {
 		t.Fatalf("OpenLong: %v", err)
@@ -825,7 +825,7 @@ func TestPersistence_LiquidationSurvivesRestart(t *testing.T) {
 		InitialBalance: 999_999, // ignored — hydrated
 		FeeBps:         0,
 		MarkPriceFunc:  mp.get,
-		Store:          st, ExchangeID: "liq-test",
+		Store:          st, TraderID: "liq-test",
 	})
 
 	bal, _ := tr2.GetBalance()

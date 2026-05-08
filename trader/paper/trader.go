@@ -148,7 +148,12 @@ type Trader struct {
 	leverageBySym   map[string]int
 
 	// Persistence — optional. Both must be set together or both nil/empty.
+	// traderID is the per-trader key into store.PaperState; exchangeID is
+	// kept only for traceability (logged + persisted alongside) so a
+	// reset-or-recreate workflow can identify which paper exchange template
+	// the trader was originally bound to.
 	store      *store.Store
+	traderID   string
 	exchangeID string
 
 	// Mutable state.
@@ -177,11 +182,16 @@ type Config struct {
 	FundingRateFunc FundingRateFunc // optional override (defaults to live market data; tests inject deterministic rates)
 	NowFunc         NowFunc         // optional override (defaults to time.Now; tests inject deterministic clocks)
 
-	// Persistence (both required together, both optional). When provided, the
-	// trader hydrates from store on construction and writes the full state
-	// back after every mutation. When omitted, the trader is purely in-memory
-	// and resets on restart.
+	// Persistence (Store + TraderID required together, both optional).
+	// When provided, the trader hydrates from store on construction and
+	// writes the full state back after every mutation. When omitted, the
+	// trader is purely in-memory and resets on restart.
+	//
+	// ExchangeID is OPTIONAL — kept only for trace/logging so a reset
+	// workflow can identify which paper exchange template the trader was
+	// bound to. It is not part of the persistence key.
 	Store      *store.Store
+	TraderID   string
 	ExchangeID string
 }
 
@@ -213,10 +223,11 @@ func New(cfg Config) (*Trader, error) {
 		nw = func() time.Time { return time.Now().UTC() }
 	}
 
-	// Persistence is opt-in but all-or-nothing — both fields must agree.
-	persistEnabled := cfg.Store != nil && cfg.ExchangeID != ""
-	if (cfg.Store != nil) != (cfg.ExchangeID != "") {
-		return nil, fmt.Errorf("paper: Store and ExchangeID must be set together or both omitted")
+	// Persistence is opt-in but all-or-nothing — Store and TraderID must
+	// agree. ExchangeID is optional metadata only.
+	persistEnabled := cfg.Store != nil && cfg.TraderID != ""
+	if (cfg.Store != nil) != (cfg.TraderID != "") {
+		return nil, fmt.Errorf("paper: Store and TraderID must be set together or both omitted")
 	}
 
 	t := &Trader{
@@ -225,6 +236,7 @@ func New(cfg Config) (*Trader, error) {
 		now:            nw,
 		leverageBySym:  make(map[string]int),
 		store:          cfg.Store,
+		traderID:       cfg.TraderID,
 		exchangeID:     cfg.ExchangeID,
 		positions:      make(map[string]*Position),
 		orders:         make(map[string]*pendingOrder),
@@ -244,22 +256,22 @@ func New(cfg Config) (*Trader, error) {
 		hydrated, err := t.tryHydrate()
 		if err != nil {
 			// Hydration shouldn't be fatal — log loudly and start fresh so a
-			// corrupted blob doesn't lock the whole exchange out.
-			logger.Warnf("📄 [paper] hydrate failed for %s, starting fresh: %v", cfg.ExchangeID, err)
+			// corrupted blob doesn't lock the whole trader out.
+			logger.Warnf("📄 [paper] hydrate failed for trader=%s, starting fresh: %v", cfg.TraderID, err)
 		}
 		if !hydrated {
 			if cfg.InitialBalance <= 0 {
-				return nil, fmt.Errorf("paper: InitialBalance must be > 0 (no persisted state for exchange %s)", cfg.ExchangeID)
+				return nil, fmt.Errorf("paper: InitialBalance must be > 0 (no persisted state for trader %s)", cfg.TraderID)
 			}
 			t.balance = cfg.InitialBalance
 			if err := t.persistLocked(); err != nil {
 				logger.Warnf("📄 [paper] initial persist failed: %v", err)
 			}
-			logger.Infof("📄 [paper] initialized fresh: exchange=%s balance=%.2f USDT, fee=%.2fbps",
-				cfg.ExchangeID, cfg.InitialBalance, cfg.FeeBps)
+			logger.Infof("📄 [paper] initialized fresh: trader=%s exchange=%s balance=%.2f USDT, fee=%.2fbps",
+				cfg.TraderID, cfg.ExchangeID, cfg.InitialBalance, cfg.FeeBps)
 		} else {
-			logger.Infof("📄 [paper] hydrated from store: exchange=%s balance=%.2f, positions=%d, fee=%.2fbps",
-				cfg.ExchangeID, t.balance, len(t.positions), cfg.FeeBps)
+			logger.Infof("📄 [paper] hydrated from store: trader=%s exchange=%s balance=%.2f, positions=%d, fee=%.2fbps",
+				cfg.TraderID, cfg.ExchangeID, t.balance, len(t.positions), cfg.FeeBps)
 		}
 		return t, nil
 	}
@@ -316,7 +328,7 @@ func (o *pendingOrder) UnmarshalJSON(b []byte) error {
 // tryHydrate loads state from the store. Returns true if a row was found and
 // successfully applied; false if no row exists (caller should init fresh).
 func (t *Trader) tryHydrate() (bool, error) {
-	row, err := t.store.PaperState().Get(t.exchangeID)
+	row, err := t.store.PaperState().Get(t.traderID)
 	if err != nil {
 		return false, err
 	}
@@ -360,7 +372,7 @@ func (t *Trader) tryHydrate() (bool, error) {
 // (write). Failures are returned but callers typically log and continue —
 // losing one snapshot is recoverable next tick.
 func (t *Trader) persistLocked() error {
-	if t.store == nil || t.exchangeID == "" {
+	if t.store == nil || t.traderID == "" {
 		return nil // persistence disabled
 	}
 
@@ -383,6 +395,7 @@ func (t *Trader) persistLocked() error {
 	}
 
 	row := &store.PaperState{
+		TraderID:        t.traderID,
 		ExchangeID:      t.exchangeID,
 		Balance:         t.balance,
 		IsCrossMargin:   t.isCrossMargin,
@@ -1404,8 +1417,8 @@ func (t *Trader) Reset(initialBalance float64) error {
 	if err := t.persistLocked(); err != nil {
 		return fmt.Errorf("paper Reset: persist failed: %w", err)
 	}
-	logger.Infof("📄 [paper] reset: exchange=%s balance=%.2f USDT (positions/orders/history cleared)",
-		t.exchangeID, initialBalance)
+	logger.Infof("📄 [paper] reset: trader=%s exchange=%s balance=%.2f USDT (positions/orders/history cleared)",
+		t.traderID, t.exchangeID, initialBalance)
 	return nil
 }
 

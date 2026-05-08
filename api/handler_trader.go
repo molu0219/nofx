@@ -872,3 +872,76 @@ func (s *Server) handleStopTrader(c *gin.Context) {
 	logger.Infof("⏹  Trader %s stopped", trader.GetName())
 	c.JSON(http.StatusOK, gin.H{"message": "Trader stopped"})
 }
+
+// handleResetPaperTrader wipes one paper trader's persisted state back to a
+// clean initial balance. Per-trader scope means the user can recycle one
+// account without touching siblings bound to the same paper exchange template.
+//
+// When the AutoTrader is currently loaded in TraderManager we call its
+// underlying paper.Trader.Reset() so the in-memory snapshot is cleared
+// before the next persist would overwrite a DB-only reset. When no trader
+// instance exists (e.g. trader stopped + unloaded), we fall through to
+// deleting the paper_states row directly.
+//
+// Hard 400 on non-paper traders — there's no "reset" semantics for real
+// exchanges where state lives on the venue.
+func (s *Server) handleResetPaperTrader(c *gin.Context) {
+	userID := c.GetString("user_id")
+	traderID := c.Param("id")
+	if traderID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Trader ID is required"})
+		return
+	}
+
+	// Confirm ownership + paper exchange.
+	cfg, err := s.store.Trader().GetFullConfig(userID, traderID)
+	if err != nil || cfg == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Trader does not exist or no access permission"})
+		return
+	}
+	if cfg.Exchange == nil || cfg.Exchange.ExchangeType != "paper" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Reset only applies to paper traders"})
+		return
+	}
+
+	var req struct {
+		InitialBalance float64 `json:"initial_balance"`
+	}
+	_ = c.ShouldBindJSON(&req) // body optional
+	balance := req.InitialBalance
+	if balance <= 0 {
+		balance = 10000
+	}
+
+	// Prefer live in-memory reset when the trader is loaded — otherwise the
+	// next persist would clobber our DB delete.
+	if at, err := s.traderManager.GetTrader(traderID); err == nil && at != nil {
+		if paper, ok := at.GetTrader().(interface {
+			Reset(initialBalance float64) error
+		}); ok {
+			if err := paper.Reset(balance); err != nil {
+				SafeInternalError(c, "Failed to reset paper trader", err)
+				return
+			}
+			logger.Infof("📄 Reset paper trader %s (live) to balance=%.2f", traderID, balance)
+			c.JSON(http.StatusOK, gin.H{
+				"message":         "Paper trader reset",
+				"initial_balance": balance,
+				"live_reset":      true,
+			})
+			return
+		}
+	}
+
+	// No live trader — clear the persisted row so the next hydration starts fresh.
+	if err := s.store.PaperState().Delete(traderID); err != nil {
+		SafeInternalError(c, "Failed to clear paper state", err)
+		return
+	}
+	logger.Infof("📄 Reset paper trader %s (offline) — paper_state row cleared", traderID)
+	c.JSON(http.StatusOK, gin.H{
+		"message":         "Paper trader reset",
+		"initial_balance": balance,
+		"live_reset":      false,
+	})
+}

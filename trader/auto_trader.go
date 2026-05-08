@@ -363,7 +363,11 @@ func NewAutoTrader(config AutoTraderConfig, st *store.Store, userID string) (*Au
 			InitialBalance: paperBalance,
 			FeeBps:         fee,
 			Store:          st,
-			ExchangeID:     config.ExchangeID,
+			// Per-trader paper state — each AutoTrader owns its own
+			// balance/positions even when multiple traders share the same
+			// paper exchange template. ExchangeID kept for trace.
+			TraderID:   config.ID,
+			ExchangeID: config.ExchangeID,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize paper trader: %w", err)

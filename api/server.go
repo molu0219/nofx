@@ -228,10 +228,11 @@ Use this to enable/disable an exchange or update API credentials. The "id" field
 			s.routeWithSchema(protected, "DELETE", "/exchanges/:id", "Delete exchange account",
 				`:id = EXACT id from GET /api/exchanges. Permanently removes the exchange account and disconnects any traders using it.`,
 				s.handleDeleteExchange)
-			s.routeWithSchema(protected, "POST", "/exchanges/:id/paper/reset", "Reset a paper exchange account to a clean balance",
-				`:id = EXACT id from GET /api/exchanges (must be a paper exchange). Body: {"initial_balance":<number, default 10000>}.
-Wipes all positions, pending orders, and closed PnL history; restores balance to initial_balance. Use after deleting a trader to clear orphan positions, or when you want to recycle a paper account for a fresh test.`,
-				s.handleResetPaperExchange)
+			s.routeWithSchema(protected, "POST", "/traders/:id/paper/reset", "Reset a paper trader's simulated account to a clean balance",
+				`:id = EXACT trader id from GET /api/my-traders (the trader must be on a paper exchange).
+Body: {"initial_balance":<number, default 10000>}.
+Wipes the trader's positions, pending orders, and closed PnL history; restores balance to initial_balance. Use to recycle a paper trader for a fresh test without recreating it.`,
+				s.handleResetPaperTrader)
 
 			// Telegram bot configuration
 			s.routeWithSchema(protected, "GET", "/telegram", "Get Telegram bot configuration",
