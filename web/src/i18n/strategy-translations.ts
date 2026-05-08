@@ -226,7 +226,11 @@ export const indicator = {
   volume: { zh: '成交量', en: 'Volume', es: 'Volumen' },
   volumeDesc: { zh: '交易量分析', en: 'Trading volume analysis', es: 'Análisis de volumen' },
   oi: { zh: '持仓量', en: 'Open Interest', es: 'Interés Abierto' },
-  oiDesc: { zh: '合约未平仓量', en: 'Futures open interest', es: 'Posiciones abiertas' },
+  oiDesc: {
+    zh: '持仓量快照 + 1h/4h/24h 变化 + 24h 历史序列',
+    en: 'OI snapshot + 1h/4h/24h deltas + 24h history series',
+    es: 'OI + variación 1h/4h/24h + serie 24h',
+  },
   fundingRate: { zh: '资金费率', en: 'Funding Rate', es: 'Funding Rate' },
   fundingRateDesc: { zh: '永续合约资金费率', en: 'Perpetual funding rate', es: 'Rate de perpetuo' },
   oiRanking: { zh: 'OI 排行', en: 'OI Ranking', es: 'Ranking OI' },

@@ -809,9 +809,18 @@ func (c *StrategyConfig) EstimateTokens() TokenEstimate {
 
 	totalMarketChars := numCoins * numTimeframes * charsPerCoinTF
 
-	// OI + Funding per coin
+	// OI (snapshot + 1h/4h/24h deltas + 24-point hourly history series) +
+	// Funding per coin. Series adds ~24 × 8 chars = ~190 chars; deltas
+	// header ~70 chars; funding ~30 chars. Round to 280 + 30 for headroom.
 	if c.Indicators.EnableOI || c.Indicators.EnableFundingRate {
-		totalMarketChars += numCoins * 100
+		perCoin := 0
+		if c.Indicators.EnableOI {
+			perCoin += 280
+		}
+		if c.Indicators.EnableFundingRate {
+			perCoin += 30
+		}
+		totalMarketChars += numCoins * perCoin
 	}
 
 	breakdown.MarketData = totalMarketChars / 4 // numeric data: ~4 chars per token

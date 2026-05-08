@@ -545,9 +545,28 @@ func (e *StrategyEngine) formatMarketData(data *market.Data) string {
 	if indicators.EnableOI || indicators.EnableFundingRate {
 		sb.WriteString(fmt.Sprintf("Additional data for %s:\n\n", data.Symbol))
 
-		if indicators.EnableOI && data.OpenInterest != nil {
-			sb.WriteString(fmt.Sprintf("Open Interest: Latest: %.2f Average: %.2f\n\n",
-				data.OpenInterest.Latest, data.OpenInterest.Average))
+		if indicators.EnableOI && data.OpenInterest != nil && data.OpenInterest.Latest > 0 {
+			// Snapshot + 1h/4h/24h deltas computed in market.getOpenInterestData
+			// from /futures/data/openInterestHist (24-point hourly window).
+			// History series included so the model can spot acceleration vs
+			// gradual drift.
+			sb.WriteString(fmt.Sprintf(
+				"Open Interest: %.2f (Δ1h=%+0.2f%% Δ4h=%+0.2f%% Δ24h=%+0.2f%%)\n",
+				data.OpenInterest.Latest,
+				data.OpenInterest.Change1h,
+				data.OpenInterest.Change4h,
+				data.OpenInterest.Change24h,
+			))
+			if len(data.OpenInterest.History) >= 2 {
+				series := make([]string, 0, len(data.OpenInterest.History))
+				for _, v := range data.OpenInterest.History {
+					series = append(series, fmt.Sprintf("%.0f", v))
+				}
+				sb.WriteString("OI series (1h, oldest→latest): ")
+				sb.WriteString(strings.Join(series, ", "))
+				sb.WriteString("\n")
+			}
+			sb.WriteString("\n")
 		}
 
 		if indicators.EnableFundingRate {

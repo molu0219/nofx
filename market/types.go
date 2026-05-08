@@ -47,10 +47,21 @@ type TimeframeSeriesData struct {
 	BOLLLower  []float64 `json:"boll_lower"`  // Lower band
 }
 
-// OIData Open Interest data
+// OIData captures open-interest signals for a perp contract. Latest is the
+// most recent value (base coin units); the Change* fields are percent
+// changes vs that lookback (e.g. Change1h = (Latest - 1h_ago) / 1h_ago * 100).
+// History is the recent series (oldest → latest, 1-hour period) so the AI
+// can spot acceleration and inflection rather than just the snapshot.
+//
+// All fields are populated together by market.getOpenInterestData; if the
+// upstream Binance call fails or returns insufficient history, missing
+// deltas stay at zero and History stays nil — Format() guards against both.
 type OIData struct {
-	Latest  float64
-	Average float64
+	Latest    float64
+	Change1h  float64
+	Change4h  float64
+	Change24h float64
+	History   []float64
 }
 
 // IntradayData intraday data (3-minute interval)

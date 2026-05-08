@@ -113,7 +113,7 @@ func GetWithExchange(symbol, exchange string) (*Data, error) {
 	oiData, err := getOpenInterestData(symbol)
 	if err != nil {
 		// OI failure doesn't affect overall result, use default values
-		oiData = &OIData{Latest: 0, Average: 0}
+		oiData = &OIData{}
 	}
 
 	// Get Funding Rate
@@ -235,7 +235,7 @@ func GetWithTimeframes(symbol string, timeframes []string, primaryTimeframe stri
 	// Get OI data
 	oiData, err := getOpenInterestData(symbol)
 	if err != nil {
-		oiData = &OIData{Latest: 0, Average: 0}
+		oiData = &OIData{}
 	}
 
 	// Get Funding Rate
@@ -255,9 +255,24 @@ func GetWithTimeframes(symbol string, timeframes []string, primaryTimeframe stri
 	}, nil
 }
 
-// getOpenInterestData retrieves OI data
+// getOpenInterestData fetches a 24-point hourly OI history from Binance's
+// /futures/data/openInterestHist endpoint and computes 1h / 4h / 24h percent
+// deltas from the same time series — so the AI sees a real momentum signal
+// instead of a single snapshot.
+//
+// Endpoint: /futures/data/openInterestHist?symbol=X&period=1h&limit=24
+//   - Public, weight 1 per call
+//   - Returns up to 30d of history; 24h × 1h granularity is plenty for
+//     short-term trading signal extraction without bloating the prompt
+//
+// On any thin response (< 2 points) we still return a non-nil OIData with
+// whatever Latest we have so the caller can render "Latest only" instead of
+// failing the whole analysis.
 func getOpenInterestData(symbol string) (*OIData, error) {
-	url := fmt.Sprintf("https://fapi.binance.com/fapi/v1/openInterest?symbol=%s", symbol)
+	url := fmt.Sprintf(
+		"https://fapi.binance.com/futures/data/openInterestHist?symbol=%s&period=1h&limit=24",
+		symbol,
+	)
 
 	apiClient := NewAPIClient()
 	resp, err := apiClient.client.Get(url)
@@ -271,21 +286,55 @@ func getOpenInterestData(symbol string) (*OIData, error) {
 		return nil, err
 	}
 
-	var result struct {
-		OpenInterest string `json:"openInterest"`
-		Symbol       string `json:"symbol"`
-		Time         int64  `json:"time"`
+	var raw []struct {
+		Symbol               string `json:"symbol"`
+		SumOpenInterest      string `json:"sumOpenInterest"`
+		SumOpenInterestValue string `json:"sumOpenInterestValue"`
+		Timestamp            int64  `json:"timestamp"`
 	}
-
-	if err := json.Unmarshal(body, &result); err != nil {
+	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, err
 	}
+	if len(raw) == 0 {
+		return &OIData{}, nil
+	}
 
-	oi, _ := strconv.ParseFloat(result.OpenInterest, 64)
+	// Binance returns this endpoint oldest → latest, but we don't rely on
+	// that — we filter to non-zero parses and use the last as latest. (Drop
+	// any malformed / zero entries instead of polluting the deltas.)
+	hist := make([]float64, 0, len(raw))
+	for _, r := range raw {
+		v, err := strconv.ParseFloat(r.SumOpenInterest, 64)
+		if err != nil || v <= 0 {
+			continue
+		}
+		hist = append(hist, v)
+	}
+	if len(hist) == 0 {
+		return &OIData{}, nil
+	}
+	latest := hist[len(hist)-1]
+
+	// pctChange returns (latest - reference) / reference * 100, or 0 if
+	// history is too short or the reference is non-positive.
+	pctChange := func(stepsBack int) float64 {
+		idx := len(hist) - 1 - stepsBack
+		if idx < 0 {
+			return 0
+		}
+		ref := hist[idx]
+		if ref <= 0 {
+			return 0
+		}
+		return ((latest - ref) / ref) * 100
+	}
 
 	return &OIData{
-		Latest:  oi,
-		Average: oi * 0.999, // Approximate average
+		Latest:    latest,
+		Change1h:  pctChange(1),
+		Change4h:  pctChange(4),
+		Change24h: pctChange(23), // 24-bucket window: index 0 is "23h ago"
+		History:   hist,
 	}, nil
 }
 
@@ -354,11 +403,7 @@ func Format(data *Data) string {
 		data.Symbol))
 
 	if data.OpenInterest != nil {
-		// Format OI data with dynamic precision
-		oiLatestStr := formatPriceWithDynamicPrecision(data.OpenInterest.Latest)
-		oiAverageStr := formatPriceWithDynamicPrecision(data.OpenInterest.Average)
-		sb.WriteString(fmt.Sprintf("Open Interest: Latest: %s Average: %s\n\n",
-			oiLatestStr, oiAverageStr))
+		sb.WriteString(formatOpenInterest(data.OpenInterest))
 	}
 
 	sb.WriteString(fmt.Sprintf("Funding Rate: %.2e\n\n", data.FundingRate))
@@ -620,7 +665,7 @@ func BuildDataFromKlines(symbol string, primary []Kline, longer []Kline) (*Data,
 		CurrentRSI7:       calculateRSI(primary, 7),
 		PriceChange1h:     priceChangeFromSeries(primary, time.Hour),
 		PriceChange4h:     priceChangeFromSeries(primary, 4*time.Hour),
-		OpenInterest:      &OIData{Latest: 0, Average: 0},
+		OpenInterest:      &OIData{},
 		FundingRate:       0,
 		IntradaySeries:    calculateIntradaySeries(primary),
 		LongerTermContext: nil,
@@ -693,4 +738,29 @@ func isStaleData(klines []Kline, symbol string) bool {
 	// Price frozen but has volume: might be extremely low volatility market, allow but log warning
 	logger.Infof("⚠️  %s detected extreme price stability (no fluctuation for %d consecutive periods), but volume is normal", symbol, stalePriceThreshold)
 	return false
+}
+
+// formatOpenInterest renders OI data into the AI prompt. Goal: dense + scan-
+// friendly. The model sees a single line with current value + 1h/4h/24h
+// deltas, plus the recent series oldest→latest so it can spot acceleration
+// (e.g. flat for 20h then sharp ramp the last 4h is a different story than
+// gradual climb). Returns empty string when oi is nil so callers can
+// unconditionally append.
+func formatOpenInterest(oi *OIData) string {
+	if oi == nil || oi.Latest <= 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf(
+		"Open Interest: %s (Δ1h=%+0.2f%% Δ4h=%+0.2f%% Δ24h=%+0.2f%%)\n",
+		formatPriceWithDynamicPrecision(oi.Latest),
+		oi.Change1h, oi.Change4h, oi.Change24h,
+	))
+	if len(oi.History) >= 2 {
+		sb.WriteString("OI series (1h, oldest→latest): ")
+		sb.WriteString(formatFloatSlice(oi.History))
+		sb.WriteString("\n")
+	}
+	sb.WriteString("\n")
+	return sb.String()
 }
