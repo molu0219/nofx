@@ -108,6 +108,15 @@ func GetFullDecisionWithStrategy(ctx *Context, mcpClient mcp.AIClient, engine *S
 	// 3. Build User Prompt using strategy engine
 	userPrompt := engine.BuildUserPrompt(ctx)
 
+	// Per-cycle context budget telemetry — one line summarising how each
+	// section consumed its share of the prompt. Spotting market_data!
+	// (overflow flag) tells us indicators are getting truncated; spotting
+	// past_reasonings creeping over its cap tells us the trail needs
+	// shrinking. Cheap to log, expensive not to.
+	if budget := engine.LastPromptBudget(); budget != nil {
+		logger.Info("🧮 " + budget.Report())
+	}
+
 	// 4. Call AI API
 	aiCallStart := time.Now()
 	aiResponse, err := mcpClient.CallWithMessages(systemPrompt, userPrompt)

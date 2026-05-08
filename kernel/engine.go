@@ -209,6 +209,19 @@ type OIDeltaData struct {
 type StrategyEngine struct {
 	config       *store.StrategyConfig
 	nofxosClient *nofxos.Client
+	// lastBudget tracks the most recent BuildSystemPrompt+BuildUserPrompt
+	// pair's per-section consumption so AutoTrader can log a one-line
+	// digest after each cycle. Reset at the start of BuildSystemPrompt.
+	// Nil-safe: when never reset (e.g. unit tests that build prompts
+	// directly), all measurement is silently skipped.
+	lastBudget *PromptBudget
+}
+
+// LastPromptBudget returns the budget snapshot from the most recently
+// built system+user prompt pair. May be nil if no prompt has been built
+// yet on this engine.
+func (e *StrategyEngine) LastPromptBudget() *PromptBudget {
+	return e.lastBudget
 }
 
 // NewStrategyEngine creates strategy execution engine.

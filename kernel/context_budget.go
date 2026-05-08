@@ -214,3 +214,61 @@ func (b *PromptBudget) HasOverflow() bool {
 	}
 	return false
 }
+
+// Charge directly attributes already-emitted bytes to a section without
+// trimming. Used by section meters that wrap an existing strings.Builder
+// for observability — content was already written; we're recording the
+// size after the fact and flagging overage when it exceeds the limit.
+//
+// For new code that controls the writes, prefer Add(). Charge is the path
+// for retrofitting budget observability into an existing builder without
+// rewriting it line-by-line.
+func (b *PromptBudget) Charge(section PromptSection, n int) {
+	if b == nil || n <= 0 {
+		return
+	}
+	limit := b.limits[section]
+	b.used[section] += n
+	if limit > 0 && b.used[section] > limit {
+		b.overage[section] += b.used[section] - limit
+		b.used[section] = limit
+	}
+}
+
+// PromptMeter wraps a strings.Builder so each completed section can be
+// charged to a PromptBudget in one Mark() call. Cheap retrofit pattern:
+//
+//	m := NewPromptMeter(&sb, budget)
+//	sb.WriteString(somePart)
+//	sb.WriteString(somePart2)
+//	m.Mark(SectionMarketData)  // attributes everything since last Mark
+//
+// Mark is idempotent on identical content lengths and safe to call when
+// budget is nil (no-op).
+type PromptMeter struct {
+	sb     *strings.Builder
+	budget *PromptBudget
+	last   int
+}
+
+// NewPromptMeter returns a meter rooted at sb's current length.
+func NewPromptMeter(sb *strings.Builder, budget *PromptBudget) *PromptMeter {
+	if sb == nil {
+		return &PromptMeter{}
+	}
+	return &PromptMeter{sb: sb, budget: budget, last: sb.Len()}
+}
+
+// Mark attributes everything written since the last Mark/construction to
+// the given section. Subsequent writes start a new section.
+func (m *PromptMeter) Mark(section PromptSection) {
+	if m == nil || m.sb == nil {
+		return
+	}
+	n := m.sb.Len() - m.last
+	m.last = m.sb.Len()
+	if m.budget == nil || n <= 0 {
+		return
+	}
+	m.budget.Charge(section, n)
+}

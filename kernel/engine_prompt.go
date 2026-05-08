@@ -19,12 +19,19 @@ func (e *StrategyEngine) BuildSystemPrompt(accountEquity float64, variant string
 	riskControl := e.config.RiskControl
 	promptSections := e.config.PromptSections
 
+	// Reset budget at the start of every system+user prompt pair so
+	// AutoTrader sees a clean per-cycle digest. The meter charges the new
+	// strings.Builder bytes to whichever section we're in when Mark fires.
+	e.lastBudget = NewPromptBudget()
+	meter := NewPromptMeter(&sb, e.lastBudget)
+
 	// 0. Data Dictionary & Schema (ensure AI understands all fields)
 	lang := e.GetLanguage()
 	schemaPrompt := GetSchemaPrompt(lang)
 	sb.WriteString(schemaPrompt)
 	sb.WriteString("\n\n")
 	sb.WriteString("---\n\n")
+	meter.Mark(SectionDataDictionary)
 
 	// 1. Role definition (editable)
 	if promptSections.RoleDefinition != "" {
@@ -34,6 +41,7 @@ func (e *StrategyEngine) BuildSystemPrompt(accountEquity float64, variant string
 		sb.WriteString("# You are a professional cryptocurrency trading AI\n\n")
 		sb.WriteString("Your task is to make trading decisions based on provided market data.\n\n")
 	}
+	meter.Mark(SectionRoleDefinition)
 
 	// 2. Trading mode variant
 	switch strings.ToLower(strings.TrimSpace(variant)) {
@@ -81,6 +89,11 @@ func (e *StrategyEngine) BuildSystemPrompt(accountEquity float64, variant string
 		accountEquity, btcEthPosValueRatio, accountEquity*btcEthPosValueRatio))
 	sb.WriteString("- **DO NOT** just use available_balance as position_size_usd. Use the Position Value Limits!\n\n")
 
+	// Sections 2 (mode) + 3 (hard constraints) + position sizing all charge
+	// to decision_rules — they tell the AI what's allowed, not what data
+	// it has.
+	meter.Mark(SectionDecisionRules)
+
 	// 4. Trading frequency (editable)
 	if promptSections.TradingFrequency != "" {
 		sb.WriteString(promptSections.TradingFrequency)
@@ -92,6 +105,7 @@ func (e *StrategyEngine) BuildSystemPrompt(accountEquity float64, variant string
 		sb.WriteString("- Single position hold time ≥ 30-60 minutes\n")
 		sb.WriteString("If you find yourself trading every period → standards too low; if closing positions < 30 minutes → too impatient.\n\n")
 	}
+	meter.Mark(SectionTradingFreq)
 
 	// 5. Entry standards (editable)
 	if promptSections.EntryStandards != "" {
@@ -148,6 +162,10 @@ func (e *StrategyEngine) BuildSystemPrompt(accountEquity float64, variant string
 		sb.WriteString("\n\n")
 		sb.WriteString("Note: The above personalized strategy is a supplement to the basic rules and cannot violate the basic risk control principles.\n")
 	}
+	// Entry standards + decision process + output format + custom prompt
+	// all roll into decision_rules — they're directives about HOW to
+	// decide, not raw data feeds.
+	meter.Mark(SectionDecisionRules)
 
 	return sb.String()
 }
@@ -228,16 +246,22 @@ func (e *StrategyEngine) writeAvailableIndicators(sb *strings.Builder) {
 func (e *StrategyEngine) BuildUserPrompt(ctx *Context) string {
 	var sb strings.Builder
 
+	// Continue accumulating into the same per-cycle budget set up by
+	// BuildSystemPrompt. If BuildSystemPrompt wasn't called first
+	// (unusual — only tests do that), Mark() is nil-safe.
+	meter := NewPromptMeter(&sb, e.lastBudget)
+
 	// System status
 	sb.WriteString(fmt.Sprintf("Time: %s | Period: #%d | Runtime: %d minutes\n\n",
 		ctx.CurrentTime, ctx.CallCount, ctx.RuntimeMinutes))
 
-	// BTC market
+	// BTC market — header summary, charged to market_data since it's price data
 	if btcData, hasBTC := ctx.MarketDataMap["BTCUSDT"]; hasBTC {
 		sb.WriteString(fmt.Sprintf("BTC: %.2f (1h: %+.2f%%, 4h: %+.2f%%) | MACD: %.4f | RSI: %.2f\n\n",
 			btcData.CurrentPrice, btcData.PriceChange1h, btcData.PriceChange4h,
 			btcData.CurrentMACD, btcData.CurrentRSI7))
 	}
+	meter.Mark(SectionMarketData)
 
 	// Account information
 	sb.WriteString(fmt.Sprintf("Account: Equity %.2f | Balance %.2f (%.1f%%) | PnL %+.2f%% | Margin %.1f%% | Positions %d\n\n",
@@ -247,6 +271,7 @@ func (e *StrategyEngine) BuildUserPrompt(ctx *Context) string {
 		ctx.Account.TotalPnLPct,
 		ctx.Account.MarginUsedPct,
 		ctx.Account.PositionCount))
+	meter.Mark(SectionAccountState)
 
 	// Reasoning trail (option B memory): show what previous cycles thought +
 	// did so this fresh-session call can detect its own patterns ("I keep
@@ -267,6 +292,7 @@ func (e *StrategyEngine) BuildUserPrompt(ctx *Context) string {
 		}
 		sb.WriteString("\n")
 	}
+	meter.Mark(SectionPastReasonings)
 
 	// Recently completed orders (placed before positions to ensure visibility)
 	if len(ctx.RecentOrders) > 0 {
@@ -415,6 +441,11 @@ func (e *StrategyEngine) BuildUserPrompt(ctx *Context) string {
 
 	sb.WriteString("---\n\n")
 	sb.WriteString("Now please analyze and output your decision (Chain of Thought + JSON)\n")
+	// Anything between the last Mark and here (positions, trade stats,
+	// market data tables, OI/funding blocks, multi-timeframe details,
+	// quant/ranking sections) is the bulk of the prompt — attribute it
+	// to market_data, the catch-all bucket for raw signal feed.
+	meter.Mark(SectionMarketData)
 
 	return sb.String()
 }
