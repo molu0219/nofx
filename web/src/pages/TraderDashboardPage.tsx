@@ -202,7 +202,9 @@ export function TraderDashboardPage({
     )
     if (!confirmed) return
     try {
-      await api.resetPaper(selectedTrader.trader_id, 10000)
+      // Pass 0 so backend defaults to trader.initial_balance — respects
+      // the value the user picked at creation rather than bumping back to $10K.
+      await api.resetPaper(selectedTrader.trader_id, 0)
       notify.success(t('traderDashboard.resetPaperSuccess', language))
       // Force-refresh account, positions, decisions; SSE catches the rest.
       await Promise.all([

@@ -1196,7 +1196,7 @@ export const translations = {
       resetPaperTooltip: 'Reset paper account to a clean balance',
       resetPaperConfirmTitle: 'Reset paper account?',
       resetPaperConfirmMessage:
-        'This wipes all positions, pending orders, and closed PnL history, and restores the balance to 10000 USDT. This cannot be undone.',
+        "This wipes all positions, pending orders, and closed PnL history, and restores the balance to the trader's configured initial balance. This cannot be undone.",
       resetPaperConfirm: 'Reset account',
       resetPaperSuccess: 'Paper account reset',
       resetPaperFailure: 'Failed to reset paper account',
@@ -2542,7 +2542,7 @@ export const translations = {
       resetPaperTooltip: '将模拟账户重置为干净状态',
       resetPaperConfirmTitle: '确认重置模拟账户？',
       resetPaperConfirmMessage:
-        '此操作将清空所有仓位、挂单和已平仓 PnL 历史，并将余额恢复至 10000 USDT。无法撤销。',
+        '此操作将清空所有仓位、挂单和已平仓 PnL 历史，并将余额恢复至该 trader 配置的初始余额。无法撤销。',
       resetPaperConfirm: '确认重置',
       resetPaperSuccess: '模拟账户已重置',
       resetPaperFailure: '重置模拟账户失败',
@@ -3837,7 +3837,7 @@ export const translations = {
       resetPaperTooltip: 'Reset akun simulasi ke saldo bersih',
       resetPaperConfirmTitle: 'Reset akun simulasi?',
       resetPaperConfirmMessage:
-        'Ini akan menghapus semua posisi, order tertunda, dan riwayat PnL tertutup, lalu mengembalikan saldo ke 10000 USDT. Tidak bisa dibatalkan.',
+        'Ini akan menghapus semua posisi, order tertunda, dan riwayat PnL tertutup, lalu mengembalikan saldo ke initial balance trader. Tidak bisa dibatalkan.',
       resetPaperConfirm: 'Reset akun',
       resetPaperSuccess: 'Akun simulasi telah direset',
       resetPaperFailure: 'Gagal mereset akun simulasi',

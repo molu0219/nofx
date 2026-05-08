@@ -132,7 +132,11 @@ export const traderApi = {
   // initial balance. Server-side only succeeds for traders bound to a paper
   // exchange (400 otherwise) — caller is expected to gate the UI control on
   // exchange.exchange_type === 'paper'.
-  async resetPaper(traderId: string, initialBalance: number): Promise<void> {
+  //
+  // Pass initialBalance = 0 (or omit it via the typed default) to have the
+  // server fall back to the trader's configured initial_balance. Pass a
+  // positive number to override.
+  async resetPaper(traderId: string, initialBalance = 0): Promise<void> {
     const result = await httpClient.post(
       `${API_BASE}/traders/${traderId}/paper/reset`,
       { initial_balance: initialBalance }

@@ -446,7 +446,12 @@ func (s *Server) handleCreateTrader(c *gin.Context) {
 		return
 	}
 
-	{
+	// Skip balance probe for paper exchanges — the probe creates a temp
+	// in-memory paper trader with a hardcoded $10K starting balance, then
+	// "queries" it and overwrites the user's intended initial_balance with
+	// $10K. For real exchanges the probe is correct (it asks the venue for
+	// real balance); for paper, the user's input IS the source of truth.
+	if exchangeCfg.ExchangeType != "paper" {
 		tempTrader, createErr := buildExchangeProbeTrader(exchangeCfg, userID)
 		if createErr != nil {
 			SafeBadRequestWithDetails(c, formatTraderCreationError(
@@ -457,7 +462,6 @@ func (s *Server) handleCreateTrader(c *gin.Context) {
 			))
 			return
 		} else if tempTrader != nil {
-			// Query actual balance
 			balanceInfo, balanceErr := tempTrader.GetBalance()
 			if balanceErr != nil {
 				logger.Infof("⚠️ Failed to query exchange balance, using user input for initial balance: %v", balanceErr)
@@ -471,6 +475,14 @@ func (s *Server) handleCreateTrader(c *gin.Context) {
 				}
 			}
 		}
+	} else {
+		// Paper: trust the user's input. Default to 10000 only if they
+		// left it blank/zero — that's the historic baseline most traders
+		// expect for a fresh sim account.
+		if req.InitialBalance <= 0 {
+			actualBalance = 10000
+		}
+		logger.Infof("📄 Paper trader: using user-supplied initial balance %.2f USDT (no exchange probe)", actualBalance)
 	}
 
 	// Create trader configuration (database entity)
@@ -969,7 +981,14 @@ func (s *Server) handleResetPaperTrader(c *gin.Context) {
 	_ = c.ShouldBindJSON(&req) // body optional
 	balance := req.InitialBalance
 	if balance <= 0 {
-		balance = 10000
+		// Default to the trader's configured initial balance, not a
+		// hardcoded $10K — the user picked their starting balance for a
+		// reason, and "reset" should respect that intent. Falls back to
+		// 10000 only if the row somehow has no balance set (legacy data).
+		balance = cfg.Trader.InitialBalance
+		if balance <= 0 {
+			balance = 10000
+		}
 	}
 
 	// Prefer live in-memory reset when the trader is loaded — otherwise the
